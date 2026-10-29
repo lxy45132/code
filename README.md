@@ -4,7 +4,7 @@
 
 ## 当前状态
 
-施工中。已完成 **C0（工程骨架、配置契约、CLI、基础测试）**、**C1（合成人脸/场景数据、掩码、数据实体、冻结观测）** 与 **C2（纯 U-Net B0、损失、指标、训练器、checkpoint）**；下一步 C3（瓶颈 ViT、开关、参数与梯度检查）。
+施工中。已完成 **C0（工程骨架、配置契约、CLI、基础测试）**、**C1（合成人脸/场景数据、掩码、数据实体、冻结观测）**、**C2（纯 U-Net B0、损失、指标、训练器、checkpoint）** 与 **C3（瓶颈 ViT、结构开关、梯度与显存检查）**；下一步 C4（PatchGAN、两阶段训练、对抗稳定性）。
 
 项目根目录：`D:\Code\bs\code`（ASCII 路径，不需要 `PYTHONUTF8` 或 `--env-file`）。
 
@@ -17,6 +17,7 @@
 - [C0 handoff](docs/handoffs/HANDOFF_C0.md)
 - [C1 handoff](docs/handoffs/HANDOFF_C1.md)
 - [C2 handoff](docs/handoffs/HANDOFF_C2.md)
+- [C3 handoff](docs/handoffs/HANDOFF_C3.md)
 
 ## 环境
 

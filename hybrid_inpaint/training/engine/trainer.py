@@ -27,7 +27,8 @@ import torch
 
 from hybrid_inpaint.config import AppConfig
 from hybrid_inpaint.domain.entities import Sample
-from hybrid_inpaint.models.unet import UNet, compose_output
+from hybrid_inpaint.models.generator import build_generator
+from hybrid_inpaint.models.unet import compose_output
 from hybrid_inpaint.training.engine.checkpoint import (
     config_fingerprint,
     environment_info,
@@ -118,10 +119,6 @@ class Trainer:
             raise NotImplementedError(
                 "stage-two adversarial training lands in C4; set train.stage: stage1"
             )
-        if config.model.vit_depth != 0:
-            raise NotImplementedError(
-                "the bottleneck ViT lands in C3; set model.vit_depth: 0 for C2"
-            )
         if config.model.in_channels != 4 or config.model.out_channels != 3:
             raise ValueError("the C2 contract requires in_channels=4 and out_channels=3")
         if len(train_dataset) < 1 or len(val_dataset) < 1:
@@ -149,12 +146,7 @@ class Trainer:
         self.run_dir = Path(run_dir)
         self.checkpoint_dir = self.run_dir / "checkpoints"
 
-        self.model = UNet(
-            in_channels=config.model.in_channels,
-            out_channels=config.model.out_channels,
-            channels=config.model.channels,
-            norm=config.model.norm,
-        ).to(self.device)
+        self.model = build_generator(config.model).to(self.device)
         self.parameter_count = self.model.num_parameters()
 
         self.optimizer = torch.optim.Adam(

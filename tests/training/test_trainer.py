@@ -127,13 +127,36 @@ def test_resume_matches_uninterrupted_run(tmp_path: Path) -> None:
         assert torch.allclose(value, resumed.model.state_dict()[key], atol=1e-6), key
 
 
-def test_vit_depth_rejected_until_c3(tmp_path: Path) -> None:
-    config = _config(tmp_path).model_copy(
-        update={"model": ModelConfig(channels=(4, 8, 16, 32), vit_heads=1, vit_depth=2)}
+def test_training_runs_with_bottleneck_vit(tmp_path: Path) -> None:
+    config = _config(
+        tmp_path,
+        iterations=2,
+        output_name="run_vit",
+        batch_size=1,
+        val_batch_size=1,
+        val_every=1,
+        log_every=1,
+    ).model_copy(
+        update={
+            "model": ModelConfig(
+                channels=(4, 8, 16, 32),
+                vit_heads=4,
+                vit_depth=1,
+                vit_patch=2,
+                vit_mlp_ratio=2.0,
+            )
+        }
     )
-    dataset = SyntheticInpaintDataset(size=32, length=2)
-    with pytest.raises(NotImplementedError, match="C3"):
-        Trainer(config, dataset, dataset)
+    train, val, identity = build_training_datasets(config)
+    trainer = Trainer(config, train, val, data_identity=identity)
+    result = trainer.fit()
+
+    assert result.final_iteration == 2
+    assert (result.run_dir / "checkpoints" / "last.pt").is_file()
+    assert any(
+        parameter.requires_grad
+        for parameter in trainer.model.bottleneck.parameters()
+    )
 
 
 def test_stage_two_rejected_until_c4(tmp_path: Path) -> None:

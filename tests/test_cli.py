@@ -39,20 +39,28 @@ def test_start_is_registered_but_not_implemented(tmp_path: Path) -> None:
     assert "not implemented" in result.output.lower()
 
 
-def test_train_command_writes_checkpoints(tmp_path: Path) -> None:
-    config = tmp_path / "train.yaml"
+def _write_train_config(
+    tmp_path: Path,
+    *,
+    experiment_id: str = "cli_train",
+    output_dir: str = "run",
+    vit_depth: int = 0,
+    vit_heads: int = 1,
+) -> Path:
+    config = tmp_path / f"{experiment_id}.yaml"
     config.write_text(
         "\n".join(
             [
                 "contract_version: 1",
-                "experiment_id: cli_train",
+                f"experiment_id: {experiment_id}",
                 "seed: 2026",
                 "model:",
                 "  name: tiny",
                 "  channels: [4, 8, 16, 32]",
-                "  vit_depth: 0",
-                "  vit_heads: 1",
+                f"  vit_depth: {vit_depth}",
+                f"  vit_heads: {vit_heads}",
                 "  vit_patch: 2",
+                "  vit_mlp_ratio: 2.0",
                 "  norm: instance",
                 "data:",
                 "  dataset: synthetic",
@@ -73,7 +81,7 @@ def test_train_command_writes_checkpoints(tmp_path: Path) -> None:
                 "  patience: 5",
                 "  log_every: 1",
                 "  device: cpu",
-                "  output_dir: run",
+                f"  output_dir: {output_dir}",
                 "  loss:",
                 "    l1_hole: 1.0",
                 "    l1_valid: 0.5",
@@ -85,13 +93,32 @@ def test_train_command_writes_checkpoints(tmp_path: Path) -> None:
         + "\n",
         encoding="utf-8",
     )
+    return config
 
+
+def test_train_command_writes_checkpoints(tmp_path: Path) -> None:
+    config = _write_train_config(tmp_path)
     result = runner.invoke(app, ["train", "--config", str(config)])
 
     assert result.exit_code == 0, result.output
     checkpoint_dir = tmp_path / "run" / "cli_train" / "seed_2026" / "checkpoints"
     assert (checkpoint_dir / "last.pt").is_file()
     assert (checkpoint_dir / "best.pt").is_file()
+
+
+def test_train_command_with_bottleneck_vit(tmp_path: Path) -> None:
+    config = _write_train_config(
+        tmp_path,
+        experiment_id="cli_vit",
+        output_dir="run_vit",
+        vit_depth=1,
+        vit_heads=4,
+    )
+    result = runner.invoke(app, ["train", "--config", str(config)])
+
+    assert result.exit_code == 0, result.output
+    checkpoint_dir = tmp_path / "run_vit" / "cli_vit" / "seed_2026" / "checkpoints"
+    assert (checkpoint_dir / "last.pt").is_file()
 
 
 def test_data_freeze_synthetic(tmp_path: Path) -> None:

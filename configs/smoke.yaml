@@ -7,8 +7,7 @@ model:
   in_channels: 4
   out_channels: 3
   channels: [16, 32, 64, 128]
-  # C2 is the pure U-Net baseline; C3 raises this back to 2 for the smoke run.
-  vit_depth: 0
+  vit_depth: 2
   vit_heads: 4
   vit_patch: 2
   vit_mlp_ratio: 2.0
