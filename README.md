@@ -4,7 +4,9 @@
 
 ## 当前状态
 
-施工中。当前完成 **C0：工程骨架、配置契约、CLI 骨架、基础测试**。模型、数据、训练、系统模块按 `docs/` 中的施工方案逐步加入。
+施工中。已完成 **C0（工程骨架、配置契约、CLI、基础测试）**、**C1（合成人脸/场景数据、掩码、数据实体、冻结观测）** 与 **C2（纯 U-Net B0、损失、指标、训练器、checkpoint）**；下一步 C3（瓶颈 ViT、开关、参数与梯度检查）。
+
+项目根目录：`D:\Code\bs\code`（ASCII 路径，不需要 `PYTHONUTF8` 或 `--env-file`）。
 
 ## 文档
 
@@ -13,40 +15,42 @@
 - [系统设计方案](docs/02_系统设计方案.md)
 - [施工进度](docs/PROGRESS.md)
 - [C0 handoff](docs/handoffs/HANDOFF_C0.md)
+- [C1 handoff](docs/handoffs/HANDOFF_C1.md)
+- [C2 handoff](docs/handoffs/HANDOFF_C2.md)
 
 ## 环境
 
 ```bash
 uv venv --python 3.10 .venv
 uv sync --extra dev
-uv run --env-file .env pytest
+uv run --no-sync pytest
 ```
 
-> 项目路径含中文（`毕设`），Python 3.10 在 Windows 上读取 editable `.pth` 时会用 GBK 解码而失败。复制 `.env.example` 为 `.env`（已含 `PYTHONUTF8=1`），统一用 `uv run --env-file .env ...` 运行 Python 命令。
-
-GPU 训练依赖（较大）：
+GPU 训练依赖（较大，与 dev 一起装）：
 
 ```bash
 uv sync --extra dev --extra train
 ```
 
-> `uv sync` 是精确同步：只写 `--extra train` 会移除 pytest 等 dev 依赖。
+> `uv sync` 是精确同步：只写 `--extra train` 会移除 pytest 等 dev 依赖。装好额外的 `train`/`web`/`gui` 后，用 `uv run --no-sync ...` 运行命令，避免 `uv run` 再次同步时移除这些可选项。
 
 Web / 桌面依赖：
 
 ```bash
-uv sync --extra web
-uv sync --extra gui
+uv sync --extra dev --extra web
+uv sync --extra dev --extra gui
 ```
 
 ## 常用命令
 
 ```bash
-uv run --env-file .env hybrid-inpaint config validate --config configs/base.yaml
-uv run --env-file .env hybrid-inpaint data freeze-synthetic --output-dir data/synthetic/frozen --count 16 --size 256 --seed 2026
-uv run --env-file .env hybrid-inpaint start --config configs/system.yaml   # C7 之后可用
-uv run --env-file .env hybrid-inpaint gui --config configs/system.yaml     # C8 之后可用
-uv run --env-file .env hybrid-inpaint run --input-dir ... --mask-dir ...   # C6 之后可用
+uv run --no-sync hybrid-inpaint config validate --config configs/base.yaml
+uv run --no-sync hybrid-inpaint data freeze-synthetic --output-dir data/synthetic/frozen --count 16 --size 256 --seed 2026
+uv run --no-sync hybrid-inpaint train --config configs/smoke.yaml --iterations 400
+uv run --no-sync hybrid-inpaint train --config configs/smoke.yaml --resume outputs/smoke/seed_2026/checkpoints/last.pt
+uv run --no-sync hybrid-inpaint start --config configs/system.yaml   # C7 之后可用
+uv run --no-sync hybrid-inpaint gui --config configs/system.yaml     # C8 之后可用
+uv run --no-sync hybrid-inpaint run --input-dir ... --mask-dir ...   # C6 之后可用
 ```
 
 ## 目录

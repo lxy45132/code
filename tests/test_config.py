@@ -86,6 +86,32 @@ def test_channels_must_divide_heads(tmp_path: Path) -> None:
         load_config(path)
 
 
+def test_train_output_dir_resolves_against_yaml_directory(tmp_path: Path) -> None:
+    path = write_yaml(
+        tmp_path,
+        """
+        contract_version: 1
+        train:
+          output_dir: runs
+        """,
+    )
+    config = load_config(path)
+    assert config.train.output_dir == (tmp_path / "runs").resolve()
+
+
+def test_zero_train_samples_is_rejected(tmp_path: Path) -> None:
+    path = write_yaml(
+        tmp_path,
+        """
+        contract_version: 1
+        data:
+          train_samples: 0
+        """,
+    )
+    with pytest.raises(ConfigError, match="train_samples"):
+        load_config(path)
+
+
 def test_tile_overlap_must_be_smaller_than_tile(tmp_path: Path) -> None:
     path = write_yaml(
         tmp_path,

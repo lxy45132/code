@@ -7,7 +7,8 @@ model:
   in_channels: 4
   out_channels: 3
   channels: [16, 32, 64, 128]
-  vit_depth: 2
+  # C2 is the pure U-Net baseline; C3 raises this back to 2 for the smoke run.
+  vit_depth: 0
   vit_heads: 4
   vit_patch: 2
   vit_mlp_ratio: 2.0
@@ -23,6 +24,8 @@ data:
   train_split: train
   val_split: val
   test_split: test
+  train_samples: 16
+  val_samples: 8
 
 train:
   stage: stage1
@@ -36,12 +39,17 @@ train:
   grad_clip: 1.0
   precision: fp32
   val_every: 50
+  val_batch_size: 4
   patience: 3
+  log_every: 10
   seed: 2026
+  device: cpu
+  output_dir: ../outputs
   loss:
     l1_hole: 1.0
     l1_valid: 0.5
-    perceptual: 0.1
+    # The VGG perceptual loss lands in C4; C2 must not silently drop it.
+    perceptual: 0.0
     tv: 0.05
     adversarial: 0.1
 

@@ -8,6 +8,7 @@ corresponding construction step lands.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import typer
 
@@ -35,9 +36,12 @@ data_app = typer.Typer(
 app.add_typer(data_app, name="data")
 
 
-def _load_or_exit(config_path: Path) -> AppConfig:
+def _load_or_exit(
+    config_path: Path,
+    overrides: dict[str, Any] | None = None,
+) -> AppConfig:
     try:
-        return load_config(config_path)
+        return load_config(config_path, overrides=overrides)
     except ConfigError as exc:
         typer.echo(f"[config error] {exc}", err=True)
         raise typer.Exit(code=2) from exc
@@ -102,6 +106,83 @@ def data_freeze_synthetic(
         f"frozen {manifest['count']} samples at {output_dir} "
         f"(size={manifest['size']}, seed={manifest['seed']})"
     )
+
+
+@app.command("train")
+def train(
+    config: Path = typer.Option(..., "--config", "-c", exists=True, dir_okay=False),
+    output_dir: Path | None = typer.Option(
+        None,
+        "--output-dir",
+        file_okay=False,
+        help="Override train.output_dir (absolute or relative to cwd).",
+    ),
+    device: str | None = typer.Option(
+        None,
+        "--device",
+        help="Override train.device (cuda/cpu/mps).",
+    ),
+    iterations: int | None = typer.Option(
+        None,
+        "--iterations",
+        min=1,
+        help="Override train.iterations.",
+    ),
+    resume: Path | None = typer.Option(
+        None,
+        "--resume",
+        exists=True,
+        dir_okay=False,
+        help="Checkpoint written by a previous run with the same config.",
+    ),
+) -> None:
+    """Train the stage-one generator on the configured dataset."""
+    from hybrid_inpaint.training.data.factory import build_training_datasets
+    from hybrid_inpaint.training.engine.checkpoint import CheckpointError
+    from hybrid_inpaint.training.engine.trainer import Trainer
+
+    overrides: dict[str, Any] = {}
+    train_overrides: dict[str, Any] = {}
+    if output_dir is not None:
+        train_overrides["output_dir"] = str(output_dir.resolve())
+    if device is not None:
+        train_overrides["device"] = device
+    if iterations is not None:
+        train_overrides["iterations"] = iterations
+    if train_overrides:
+        overrides["train"] = train_overrides
+
+    parsed = _load_or_exit(config, overrides)
+
+    try:
+        train_dataset, val_dataset, identity = build_training_datasets(parsed)
+        trainer = Trainer(
+            parsed,
+            train_dataset,
+            val_dataset,
+            data_identity=identity,
+            device=device,
+            resume_from=resume,
+        )
+        result = trainer.fit()
+    except (
+        CheckpointError,
+        ValueError,
+        RuntimeError,
+        NotImplementedError,
+        FloatingPointError,
+    ) as exc:
+        typer.echo(f"[train error] {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+
+    typer.echo(
+        f"trained {result.start_iteration}->{result.final_iteration} iterations "
+        f"at {result.run_dir} "
+        f"(best hole PSNR={result.best_psnr_hole:.3f} dB"
+        f"{', early stopped' if result.stopped_early else ''})"
+    )
+    typer.echo(f"  last={result.run_dir / 'checkpoints' / 'last.pt'}")
+    typer.echo(f"  best={result.run_dir / 'checkpoints' / 'best.pt'}")
 
 
 @app.command("start")

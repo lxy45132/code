@@ -39,6 +39,61 @@ def test_start_is_registered_but_not_implemented(tmp_path: Path) -> None:
     assert "not implemented" in result.output.lower()
 
 
+def test_train_command_writes_checkpoints(tmp_path: Path) -> None:
+    config = tmp_path / "train.yaml"
+    config.write_text(
+        "\n".join(
+            [
+                "contract_version: 1",
+                "experiment_id: cli_train",
+                "seed: 2026",
+                "model:",
+                "  name: tiny",
+                "  channels: [4, 8, 16, 32]",
+                "  vit_depth: 0",
+                "  vit_heads: 1",
+                "  vit_patch: 2",
+                "  norm: instance",
+                "data:",
+                "  dataset: synthetic",
+                "  image_size: 32",
+                "  train_samples: 2",
+                "  val_samples: 2",
+                "train:",
+                "  stage: stage1",
+                "  iterations: 2",
+                "  batch_size: 1",
+                "  lr: 0.001",
+                "  betas: [0.5, 0.999]",
+                "  warmup_steps: 1",
+                "  min_lr: 0.00001",
+                "  precision: fp32",
+                "  val_every: 1",
+                "  val_batch_size: 1",
+                "  patience: 5",
+                "  log_every: 1",
+                "  device: cpu",
+                "  output_dir: run",
+                "  loss:",
+                "    l1_hole: 1.0",
+                "    l1_valid: 0.5",
+                "    perceptual: 0.0",
+                "    tv: 0.05",
+                "    adversarial: 0.1",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(app, ["train", "--config", str(config)])
+
+    assert result.exit_code == 0, result.output
+    checkpoint_dir = tmp_path / "run" / "cli_train" / "seed_2026" / "checkpoints"
+    assert (checkpoint_dir / "last.pt").is_file()
+    assert (checkpoint_dir / "best.pt").is_file()
+
+
 def test_data_freeze_synthetic(tmp_path: Path) -> None:
     output_dir = tmp_path / "frozen"
     result = runner.invoke(

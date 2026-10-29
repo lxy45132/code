@@ -101,6 +101,9 @@ class DataConfig(StrictModel):
     train_split: str = "train"
     val_split: str = "val"
     test_split: str = "test"
+    # Construction-time synthetic dataset sizes (ignored by real datasets).
+    train_samples: int = 256
+    val_samples: int = 16
 
     @field_validator("root", "mask_dir", "split_file")
     @classmethod
@@ -121,6 +124,13 @@ class DataConfig(StrictModel):
     def _non_negative_workers(cls, value: int) -> int:
         if value < 0:
             raise ValueError("num_workers must be >= 0")
+        return value
+
+    @field_validator("train_samples", "val_samples")
+    @classmethod
+    def _positive_samples(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("sample counts must be >= 1")
         return value
 
 
@@ -151,11 +161,23 @@ class TrainConfig(StrictModel):
     grad_clip: float = 1.0
     precision: Literal["fp32", "bf16", "fp16"] = "bf16"
     val_every: int = 5_000
+    val_batch_size: int = 8
     patience: int = 10
+    log_every: int = 10
     seed: int = 2026
+    device: Literal["cuda", "cpu", "mps"] = "cuda"
+    output_dir: Path = Path("outputs")
     loss: LossConfig = Field(default_factory=LossConfig)
 
-    @field_validator("iterations", "batch_size", "warmup_steps", "val_every", "patience")
+    @field_validator(
+        "iterations",
+        "batch_size",
+        "warmup_steps",
+        "val_every",
+        "val_batch_size",
+        "patience",
+        "log_every",
+    )
     @classmethod
     def _positive_int(cls, value: int) -> int:
         if value < 1:
@@ -181,6 +203,13 @@ class TrainConfig(StrictModel):
     def _non_negative_finite(cls, value: float) -> float:
         if not math.isfinite(value) or value < 0:
             raise ValueError("weight_decay must be finite and >= 0")
+        return value
+
+    @field_validator("output_dir")
+    @classmethod
+    def _non_empty_output_dir(cls, value: Path) -> Path:
+        if not str(value).strip():
+            raise ValueError("output_dir must not be empty")
         return value
 
     @field_validator("betas")
@@ -373,6 +402,7 @@ _PATH_FIELDS: tuple[tuple[str, str], ...] = (
     ("data", "root"),
     ("data", "split_file"),
     ("data", "mask_dir"),
+    ("train", "output_dir"),
     ("system", "checkpoint"),
     ("system", "history_db"),
     ("system", "output_dir"),
