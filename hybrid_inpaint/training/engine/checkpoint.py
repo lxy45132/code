@@ -27,7 +27,7 @@ import torch
 
 from hybrid_inpaint.config import CONTRACT_VERSION, AppConfig
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _TRAIN_FINGERPRINT_KEYS = (
     "stage",
@@ -71,6 +71,58 @@ def config_fingerprint(config: AppConfig) -> str:
         separators=(",", ":"),
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _check_stage1_to_stage2_init(
+    payload: Mapping[str, Any],
+    config: AppConfig,
+) -> None:
+    """Validate a stage-one checkpoint used to initialise stage two.
+
+    The full config fingerprint includes ``train.stage`` and the loss weights,
+    so it cannot match across the stage transition.  The parts that must stay
+    identical are the model, dataset and seed.
+    """
+    stored = payload.get("config")
+    if not isinstance(stored, Mapping):
+        raise CheckpointError("checkpoint has no config snapshot")
+
+    current = config.model_dump(mode="json")
+    for key in ("contract_version", "seed", "model", "data"):
+        if stored.get(key) != current.get(key):
+            raise CheckpointError(
+                f"stage-one checkpoint {key!r} does not match the stage-two config"
+            )
+
+
+def check_checkpoint_compatibility(
+    payload: Mapping[str, Any],
+    config: AppConfig,
+    *,
+    allow_stage_init: bool = False,
+) -> str:
+    """Return ``"resume"`` or ``"init"``; raise on incompatible checkpoints.
+
+    ``"init"`` means a stage-one checkpoint initialises a stage-two run: the
+    generator weights are loaded but iteration/optimiser state starts fresh.
+    """
+    stage = payload.get("stage")
+    if stage == config.train.stage:
+        if payload.get("config_fingerprint") != config_fingerprint(config):
+            raise CheckpointError(
+                "config fingerprint mismatch; refusing to resume "
+                f"(stored={payload.get('config_fingerprint')!r}, "
+                f"current={config_fingerprint(config)!r})"
+            )
+        return "resume"
+
+    if allow_stage_init and stage == "stage1" and config.train.stage == "stage2":
+        _check_stage1_to_stage2_init(payload, config)
+        return "init"
+
+    raise CheckpointError(
+        f"checkpoint stage {stage!r} cannot be used for {config.train.stage!r}"
+    )
 
 
 def capture_rng_state() -> dict[str, Any]:
@@ -178,10 +230,24 @@ def save_checkpoint(
     history: list[dict[str, Any]],
     patience_count: int = 0,
     data_identity: Mapping[str, Any] | None = None,
+    discriminator: torch.nn.Module | None = None,
+    optimizer_d: torch.optim.Optimizer | None = None,
+    scheduler_d: torch.optim.lr_scheduler.LRScheduler | None = None,
+    scaler_d: torch.amp.GradScaler | None = None,
+    best_lpips: float | None = None,
 ) -> Path:
-    """Write a self-describing, ``weights_only``-loadable checkpoint."""
+    """Write a self-describing, ``weights_only``-loadable checkpoint.
+
+    Stage-one runs leave the discriminator fields as ``None``; stage-two runs
+    store ``model_d``/``optimizer_d``/``scheduler_d``/``scaler_d`` alongside the
+    generator state.
+    """
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
+
+    best_metric: dict[str, float] = {"psnr_hole": float(best_psnr_hole)}
+    if best_lpips is not None:
+        best_metric["lpips"] = float(best_lpips)
 
     payload: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
@@ -192,7 +258,7 @@ def save_checkpoint(
         "config_fingerprint": config_fingerprint(config),
         "iteration": int(iteration),
         "stage": config.train.stage,
-        "best_metric": {"psnr_hole": float(best_psnr_hole)},
+        "best_metric": best_metric,
         "patience_count": int(patience_count),
         "model": model.state_dict(),
         "optimizer": optimizer.state_dict(),
@@ -204,6 +270,15 @@ def save_checkpoint(
         "environment": environment_info(),
         "git": git_info(),
     }
+    if discriminator is not None:
+        payload["model_d"] = discriminator.state_dict()
+    if optimizer_d is not None:
+        payload["optimizer_d"] = optimizer_d.state_dict()
+    if scheduler_d is not None:
+        payload["scheduler_d"] = scheduler_d.state_dict()
+    if scaler_d is not None:
+        payload["scaler_d"] = scaler_d.state_dict()
+
     torch.save(payload, target)
     return target
 

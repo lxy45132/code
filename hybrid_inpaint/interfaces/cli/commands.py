@@ -133,10 +133,13 @@ def train(
         "--resume",
         exists=True,
         dir_okay=False,
-        help="Checkpoint written by a previous run with the same config.",
+        help=(
+            "Stage-one best.pt to initialise stage two, or a stage-two "
+            "checkpoint to continue."
+        ),
     ),
 ) -> None:
-    """Train the stage-one generator on the configured dataset."""
+    """Train the generator (stage one or stage two) on the configured dataset."""
     from hybrid_inpaint.training.data.factory import build_training_datasets
     from hybrid_inpaint.training.engine.checkpoint import CheckpointError
     from hybrid_inpaint.training.engine.trainer import Trainer
@@ -175,14 +178,26 @@ def train(
         typer.echo(f"[train error] {exc}", err=True)
         raise typer.Exit(code=2) from exc
 
+    lpips_text = (
+        f", best LPIPS={result.best_lpips:.4f}"
+        if result.best_lpips is not None
+        else ""
+    )
     typer.echo(
         f"trained {result.start_iteration}->{result.final_iteration} iterations "
         f"at {result.run_dir} "
-        f"(best hole PSNR={result.best_psnr_hole:.3f} dB"
-        f"{', early stopped' if result.stopped_early else ''})"
+        f"(stage={result.stage}, best hole PSNR={result.best_psnr_hole:.3f} dB"
+        f"{lpips_text}{', early stopped' if result.stopped_early else ''})"
     )
     typer.echo(f"  last={result.run_dir / 'checkpoints' / 'last.pt'}")
-    typer.echo(f"  best={result.run_dir / 'checkpoints' / 'best.pt'}")
+    if result.stage == "stage2":
+        typer.echo(f"  best_psnr={result.run_dir / 'checkpoints' / 'best_psnr.pt'}")
+        if result.best_lpips is not None:
+            typer.echo(
+                f"  best_lpips={result.run_dir / 'checkpoints' / 'best_lpips.pt'}"
+            )
+    else:
+        typer.echo(f"  best={result.run_dir / 'checkpoints' / 'best.pt'}")
 
 
 @app.command("start")

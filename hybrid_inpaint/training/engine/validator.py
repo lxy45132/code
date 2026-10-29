@@ -47,8 +47,14 @@ def validate(
     device: torch.device,
     batch_size: int,
     loss_fn: PixelLoss,
+    lpips_metric: Any | None = None,
 ) -> dict[str, Any]:
-    """Return averaged validation metrics over ``dataset``."""
+    """Return averaged validation metrics over ``dataset``.
+
+    ``lpips_metric`` is optional because stage one does not report LPIPS and
+    the package/weights are only loaded for stage two (or when explicitly
+    requested).
+    """
     if len(dataset) < 1:
         raise ValueError("validation dataset must not be empty")
     if batch_size < 1:
@@ -58,6 +64,7 @@ def validate(
     metric_keys = ("psnr_hole", "psnr_full", "mae_hole", "mae_full", "ssim")
     totals = {key: 0.0 for key in metric_keys}
     loss_totals = {"hole": 0.0, "valid": 0.0, "tv": 0.0, "total": 0.0}
+    lpips_total = 0.0
     count = 0
 
     for start in range(0, len(dataset), batch_size):
@@ -81,9 +88,16 @@ def validate(
             metrics = evaluate_image(pred_hwc[index], target_hwc[index], mask_hw[index])
             for key in metric_keys:
                 totals[key] += metrics[key]
+            if lpips_metric is not None:
+                lpips_total += lpips_metric(
+                    composed[index : index + 1],
+                    images[index : index + 1],
+                )
             count += 1
 
     result: dict[str, Any] = {key: totals[key] / count for key in metric_keys}
     result.update({f"loss_{key}": value / count for key, value in loss_totals.items()})
+    if lpips_metric is not None:
+        result["lpips"] = lpips_total / count
     result["samples"] = count
     return result

@@ -4,7 +4,7 @@
 
 ## 当前状态
 
-施工中。已完成 **C0（工程骨架、配置契约、CLI、基础测试）**、**C1（合成人脸/场景数据、掩码、数据实体、冻结观测）**、**C2（纯 U-Net B0、损失、指标、训练器、checkpoint）** 与 **C3（瓶颈 ViT、结构开关、梯度与显存检查）**；下一步 C4（PatchGAN、两阶段训练、对抗稳定性）。
+施工中。已完成 **C0（工程骨架、配置契约、CLI、基础测试）**、**C1（合成人脸/场景数据、掩码、数据实体、冻结观测）**、**C2（纯 U-Net B0、损失、指标、训练器、checkpoint）**、**C3（瓶颈 ViT、结构开关、梯度与显存检查）** 与 **C4（PatchGAN、感知损失、两阶段训练、对抗稳定性）**；下一步 C5（固定测试、消融、高分辨率与大掩码压力测试）。
 
 项目根目录：`D:\Code\bs\code`（ASCII 路径，不需要 `PYTHONUTF8` 或 `--env-file`）。
 
@@ -18,6 +18,7 @@
 - [C1 handoff](docs/handoffs/HANDOFF_C1.md)
 - [C2 handoff](docs/handoffs/HANDOFF_C2.md)
 - [C3 handoff](docs/handoffs/HANDOFF_C3.md)
+- [C4 handoff](docs/handoffs/HANDOFF_C4.md)
 
 ## 环境
 
@@ -49,6 +50,9 @@ uv run --no-sync hybrid-inpaint config validate --config configs/base.yaml
 uv run --no-sync hybrid-inpaint data freeze-synthetic --output-dir data/synthetic/frozen --count 16 --size 256 --seed 2026
 uv run --no-sync hybrid-inpaint train --config configs/smoke.yaml --iterations 400
 uv run --no-sync hybrid-inpaint train --config configs/smoke.yaml --resume outputs/smoke/seed_2026/checkpoints/last.pt
+# 阶段二（T0 正式数据就绪后）：从阶段一 best.pt 初始化
+# uv run --no-sync hybrid-inpaint train -c configs/experiments/main.yaml \
+#   --resume outputs/b1_unet_vit/seed_2026/checkpoints/best.pt
 uv run --no-sync hybrid-inpaint start --config configs/system.yaml   # C7 之后可用
 uv run --no-sync hybrid-inpaint gui --config configs/system.yaml     # C8 之后可用
 uv run --no-sync hybrid-inpaint run --input-dir ... --mask-dir ...   # C6 之后可用

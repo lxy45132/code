@@ -78,7 +78,7 @@ def test_round_trip_weights_only(tmp_path: Path) -> None:
 
     # The on-disk format must load without arbitrary unpickling.
     raw = torch.load(path, map_location="cpu", weights_only=True)
-    assert raw["schema_version"] == 1
+    assert raw["schema_version"] == 2
     assert raw["config_fingerprint"] == config_fingerprint(config)
 
     payload = load_checkpoint(path, expected_config=config)

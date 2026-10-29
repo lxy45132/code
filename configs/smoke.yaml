@@ -47,8 +47,7 @@ train:
   loss:
     l1_hole: 1.0
     l1_valid: 0.5
-    # The VGG perceptual loss lands in C4; C2 must not silently drop it.
-    perceptual: 0.0
+    perceptual: 0.1
     tv: 0.05
     adversarial: 0.1
 

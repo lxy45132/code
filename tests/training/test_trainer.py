@@ -159,21 +159,111 @@ def test_training_runs_with_bottleneck_vit(tmp_path: Path) -> None:
     )
 
 
-def test_stage_two_rejected_until_c4(tmp_path: Path) -> None:
+class _FixedLPIPS:
+    def __init__(self, value: float = 0.2) -> None:
+        self.value = value
+
+    def __call__(self, prediction: torch.Tensor, target: torch.Tensor) -> float:
+        return self.value
+
+
+def _stage2_config(
+    tmp_path: Path,
+    stage1_config: AppConfig,
+    *,
+    iterations: int,
+    output_name: str,
+) -> AppConfig:
+    train = stage1_config.train.model_copy(
+        update={
+            "stage": "stage2",
+            "iterations": iterations,
+            "output_dir": tmp_path / output_name,
+        }
+    )
+    return stage1_config.model_copy(
+        update={"experiment_id": "trainer_test_gan", "train": train}
+    )
+
+
+def test_stage_two_training_and_resume(tmp_path: Path) -> None:
+    stage1_config = _config(
+        tmp_path,
+        iterations=2,
+        output_name="run_stage1",
+        val_every=1,
+        log_every=1,
+    )
+    train, val, identity = build_training_datasets(stage1_config)
+    stage1 = Trainer(stage1_config, train, val, data_identity=identity)
+    stage1_result = stage1.fit()
+    stage1_best = stage1_result.run_dir / "checkpoints" / "best.pt"
+    assert stage1_best.is_file()
+
+    stage2_config = _stage2_config(
+        tmp_path,
+        stage1_config,
+        iterations=2,
+        output_name="run_stage2",
+    )
+    stage2_train, stage2_val, stage2_identity = build_training_datasets(stage2_config)
+    stage2 = Trainer(
+        stage2_config,
+        stage2_train,
+        stage2_val,
+        data_identity=stage2_identity,
+        resume_from=stage1_best,
+        lpips_metric=_FixedLPIPS(0.2),
+    )
+    stage2_result = stage2.fit()
+
+    assert stage2_result.start_iteration == 0
+    assert stage2_result.final_iteration == 2
+    assert stage2_result.best_lpips == pytest.approx(0.2)
+    assert all(entry["lpips"] == pytest.approx(0.2) for entry in stage2_result.history)
+
+    checkpoint_dir = stage2_result.run_dir / "checkpoints"
+    assert (checkpoint_dir / "last.pt").is_file()
+    assert (checkpoint_dir / "best_psnr.pt").is_file()
+    assert (checkpoint_dir / "best_lpips.pt").is_file()
+
+    payload = torch.load(checkpoint_dir / "last.pt", map_location="cpu", weights_only=True)
+    assert payload["stage"] == "stage2"
+    assert "model_d" in payload
+    assert "optimizer_d" in payload
+    assert payload["best_metric"]["lpips"] == pytest.approx(0.2)
+
+    # Extending a stage-two run restores D, both optimisers and the iteration.
+    resumed_config = _stage2_config(
+        tmp_path,
+        stage1_config,
+        iterations=4,
+        output_name="run_stage2_resumed",
+    )
+    resumed_train, resumed_val, resumed_identity = build_training_datasets(
+        resumed_config
+    )
+    resumed = Trainer(
+        resumed_config,
+        resumed_train,
+        resumed_val,
+        data_identity=resumed_identity,
+        resume_from=checkpoint_dir / "last.pt",
+        lpips_metric=_FixedLPIPS(0.2),
+    )
+    resumed_result = resumed.fit()
+    assert resumed_result.start_iteration == 2
+    assert resumed_result.final_iteration == 4
+
+
+def test_stage_two_requires_a_stage_one_checkpoint(tmp_path: Path) -> None:
     config = _config(tmp_path).model_copy(
         update={
             "train": _config(tmp_path).train.model_copy(update={"stage": "stage2"})
         }
     )
     dataset = SyntheticInpaintDataset(size=32, length=2)
-    with pytest.raises(NotImplementedError, match="C4"):
-        Trainer(config, dataset, dataset)
-
-
-def test_configured_perceptual_loss_must_be_wired(tmp_path: Path) -> None:
-    config = _config(tmp_path, loss=LossConfig(perceptual=0.1))
-    dataset = SyntheticInpaintDataset(size=32, length=2)
-    with pytest.raises(ValueError, match="perceptual"):
+    with pytest.raises(ValueError, match="stage-one checkpoint"):
         Trainer(config, dataset, dataset)
 
 

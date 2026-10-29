@@ -1,15 +1,22 @@
-"""Single-stage (stage-one) training loop.
+"""Two-stage training loop.
 
-Scope of C2: pure U-Net B0, pixel losses, validation, last/best checkpoints and
-exact resume.  The bottleneck ViT (C3), perceptual loss (C4) and PatchGAN
-(C4) are explicit extension points; configuring them before those steps land
-raises instead of being silently ignored.
+Stage one trains the generator with pixel, perceptual and TV losses.  Stage two
+initialises the generator from a stage-one checkpoint, adds a PatchGAN
+discriminator and the hinge adversarial loss, and updates D then G once per
+iteration.
+
+Numerical policy:
+
+* the generator runs under BF16 autocast (when configured), but pixel/TV/
+  perceptual losses and the discriminator are computed in FP32;
+* spectral-norm statistics therefore never see mixed precision;
+* loss values and gradient norms are checked for finiteness every step.
 
 Batch composition is deterministic per iteration: iteration ``k`` draws its
-indices from ``SeedSequence([seed, 0xB2, k])``.  A resumed run therefore sees
-exactly the same batches as an uninterrupted one without having to serialise a
-DataLoader iterator.  This is sufficient for the C1 synthetic dataset; real
-image datasets will introduce worker-based loaders at T0.
+indices from ``SeedSequence([seed, 0xB2, k])``.  A resumed run sees exactly the
+same batches as an uninterrupted one without serialising a DataLoader iterator.
+This is sufficient for the C1 synthetic dataset; real image datasets will
+introduce worker-based loaders at T0.
 """
 
 from __future__ import annotations
@@ -24,19 +31,25 @@ from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
 import torch
+from torch import nn
 
 from hybrid_inpaint.config import AppConfig
 from hybrid_inpaint.domain.entities import Sample
+from hybrid_inpaint.models.discriminator import PatchDiscriminator
 from hybrid_inpaint.models.generator import build_generator
 from hybrid_inpaint.models.unet import compose_output
 from hybrid_inpaint.training.engine.checkpoint import (
+    check_checkpoint_compatibility,
     config_fingerprint,
     environment_info,
     git_info,
     load_checkpoint,
+    restore_rng_state,
     save_checkpoint,
 )
 from hybrid_inpaint.training.engine.validator import collate_samples, validate
+from hybrid_inpaint.training.losses.adversarial import hinge_d_loss, hinge_g_loss
+from hybrid_inpaint.training.losses.perceptual import PerceptualLoss
 from hybrid_inpaint.training.losses.pixel import PixelLoss
 
 PerceptualFn = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
@@ -52,6 +65,8 @@ class TrainResult:
     best_psnr_hole: float
     stopped_early: bool
     history: tuple[dict[str, Any], ...]
+    best_lpips: float | None = None
+    stage: str = "stage1"
 
 
 def make_lr_lambda(
@@ -101,7 +116,7 @@ def _resolve_device(name: str) -> torch.device:
 
 
 class Trainer:
-    """Stage-one trainer with deterministic batches and resumable checkpoints."""
+    """Stage-one / stage-two trainer with deterministic batches and resume."""
 
     def __init__(
         self,
@@ -114,23 +129,23 @@ class Trainer:
         device: str | None = None,
         resume_from: str | Path | None = None,
         perceptual: PerceptualFn | None = None,
+        lpips_metric: Any | None = None,
     ) -> None:
-        if config.train.stage != "stage1":
-            raise NotImplementedError(
-                "stage-two adversarial training lands in C4; set train.stage: stage1"
-            )
+        if config.train.stage not in ("stage1", "stage2"):
+            raise ValueError("train.stage must be stage1 or stage2")
         if config.model.in_channels != 4 or config.model.out_channels != 3:
-            raise ValueError("the C2 contract requires in_channels=4 and out_channels=3")
+            raise ValueError("the contract requires in_channels=4 and out_channels=3")
         if len(train_dataset) < 1 or len(val_dataset) < 1:
             raise ValueError("train and validation datasets must not be empty")
-        if config.train.loss.perceptual > 0 and perceptual is None:
+        if config.train.stage == "stage2" and resume_from is None:
             raise ValueError(
-                "perceptual weight is non-zero but no perceptual loss is wired yet "
-                "(C4); set train.loss.perceptual: 0.0"
+                "stage-two training must be initialised from a stage-one "
+                "checkpoint; pass --resume <run>/checkpoints/best.pt"
             )
 
         _seed_everything(config.train.seed)
 
+        self.stage = config.train.stage
         self.config = config
         self.train_dataset = train_dataset
         self.val_dataset = val_dataset
@@ -183,11 +198,46 @@ class Trainer:
             valid=config.train.loss.l1_valid,
             tv=config.train.loss.tv,
         )
-        self.perceptual = perceptual
         self.perceptual_weight = config.train.loss.perceptual
+        self.perceptual = perceptual
+        if self.perceptual_weight > 0 and self.perceptual is None:
+            self.perceptual = PerceptualLoss()
+        if isinstance(self.perceptual, nn.Module):
+            self.perceptual = self.perceptual.to(self.device).eval()
+
+        self.discriminator: PatchDiscriminator | None = None
+        self.optimizer_d: torch.optim.Optimizer | None = None
+        self.scheduler_d: torch.optim.lr_scheduler.LRScheduler | None = None
+        self.scaler_d: torch.amp.GradScaler | None = None
+        self.discriminator_parameter_count = 0
+        self.adversarial_weight = config.train.loss.adversarial
+        self.lpips_metric = lpips_metric
+
+        if self.stage == "stage2":
+            self.discriminator = PatchDiscriminator(in_channels=3).to(self.device)
+            self.discriminator_parameter_count = self.discriminator.num_parameters()
+            self.optimizer_d = torch.optim.Adam(
+                self.discriminator.parameters(),
+                lr=config.train.lr,
+                betas=config.train.betas,
+                weight_decay=config.train.weight_decay,
+            )
+            self.scheduler_d = torch.optim.lr_scheduler.LambdaLR(
+                self.optimizer_d,
+                self._lr_lambda,
+            )
+            if self.precision == "fp16":
+                self.scaler_d = torch.amp.GradScaler(
+                    "cuda", enabled=self.device.type == "cuda"
+                )
+            if self.lpips_metric is None and config.eval.compute_lpips:
+                from hybrid_inpaint.training.metrics.perceptual import LPIPSMetric
+
+                self.lpips_metric = LPIPSMetric(device=self.device)
 
         self.start_iteration = 0
         self.best_psnr_hole = float("-inf")
+        self.best_lpips = float("inf")
         self.history: list[dict[str, Any]] = []
         self._patience_count = 0
 
@@ -201,30 +251,69 @@ class Trainer:
             )
 
     # ------------------------------------------------------------------ setup
+    def _reset_lr(
+        self,
+        optimizer: torch.optim.Optimizer,
+        scheduler: torch.optim.lr_scheduler.LRScheduler,
+    ) -> None:
+        scheduler.last_epoch = self.start_iteration
+        for group, base_lr in zip(optimizer.param_groups, scheduler.base_lrs):
+            group["lr"] = base_lr * self._lr_lambda(self.start_iteration)
+
     def _resume(self, path: Path) -> None:
         payload = load_checkpoint(
             path,
-            expected_config=self.config,
+            expected_config=None,
             map_location="cpu",
-            restore_rng=True,
+            restore_rng=False,
         )
+        mode = check_checkpoint_compatibility(
+            payload,
+            self.config,
+            allow_stage_init=self.stage == "stage2",
+        )
+
         self.model.load_state_dict(payload["model"], strict=True)
+        restore_rng_state(payload["rng"])
+
+        if mode == "init":
+            # Stage one -> stage two: generator weights only.  Discriminator,
+            # optimiser, scheduler and iteration all start fresh.
+            self.start_iteration = 0
+            return
+
         self.optimizer.load_state_dict(payload["optimizer"])
         self.scheduler.load_state_dict(payload["scheduler"])
         if self.scaler is not None and payload.get("scaler"):
             self.scaler.load_state_dict(payload["scaler"])
+
+        if self.stage == "stage2":
+            if self.discriminator is None or self.optimizer_d is None:
+                raise RuntimeError("stage-two discriminator was not initialised")
+            if "model_d" not in payload:
+                raise ValueError(
+                    "checkpoint has no discriminator state; cannot resume stage two"
+                )
+            self.discriminator.load_state_dict(payload["model_d"], strict=True)
+            self.optimizer_d.load_state_dict(payload["optimizer_d"])
+            if self.scheduler_d is not None and payload.get("scheduler_d"):
+                self.scheduler_d.load_state_dict(payload["scheduler_d"])
+            if self.scaler_d is not None and payload.get("scaler_d"):
+                self.scaler_d.load_state_dict(payload["scaler_d"])
+
         self.start_iteration = int(payload["iteration"])
+        self.best_psnr_hole = float(payload["best_metric"]["psnr_hole"])
+        self.best_lpips = float(payload["best_metric"].get("lpips", float("inf")))
+        self.history = [dict(entry) for entry in payload.get("history", [])]
+        self._patience_count = int(payload.get("patience_count", 0))
 
         # Re-derive the LR for the first resumed step.  When the iteration
         # budget was extended, the checkpoint's stored LR follows the old
         # cosine schedule; recomputing keeps the resumed run identical to an
         # uninterrupted run under the new budget.
-        self.scheduler.last_epoch = self.start_iteration
-        for group, base_lr in zip(self.optimizer.param_groups, self.scheduler.base_lrs):
-            group["lr"] = base_lr * self._lr_lambda(self.start_iteration)
-        self.best_psnr_hole = float(payload["best_metric"]["psnr_hole"])
-        self.history = [dict(entry) for entry in payload.get("history", [])]
-        self._patience_count = int(payload.get("patience_count", 0))
+        self._reset_lr(self.optimizer, self.scheduler)
+        if self.optimizer_d is not None and self.scheduler_d is not None:
+            self._reset_lr(self.optimizer_d, self.scheduler_d)
 
     # --------------------------------------------------------------- training
     def _batch_indices(self, iteration: int) -> list[int]:
@@ -240,7 +329,66 @@ class Trainer:
         )
         return [int(index) for index in indices]
 
-    def _train_step(self, iteration: int) -> dict[str, float]:
+    def _optimize(
+        self,
+        loss: torch.Tensor,
+        optimizer: torch.optim.Optimizer,
+        scaler: torch.amp.GradScaler | None,
+        parameters: Any,
+        iteration: int,
+        label: str,
+    ) -> float:
+        if not bool(torch.isfinite(loss).all()):
+            raise FloatingPointError(
+                f"non-finite {label} loss at iteration {iteration}: {float(loss)}"
+            )
+
+        if scaler is not None and scaler.is_enabled():
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            grad_norm = torch.nn.utils.clip_grad_norm_(
+                parameters, self.config.train.grad_clip
+            )
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss.backward()
+            grad_norm = torch.nn.utils.clip_grad_norm_(
+                parameters, self.config.train.grad_clip
+            )
+            optimizer.step()
+
+        if not bool(torch.isfinite(grad_norm).all()):
+            raise FloatingPointError(
+                f"non-finite {label} gradient norm at iteration {iteration}: "
+                f"{float(grad_norm)}"
+            )
+        return float(grad_norm)
+
+    def _forward_generator(
+        self,
+        observed: torch.Tensor,
+        masks: torch.Tensor,
+    ) -> torch.Tensor:
+        """Run the generator under autocast and return FP32 content."""
+        with torch.autocast(
+            device_type=self.device.type,
+            dtype=self._amp_dtype,
+            enabled=self._autocast_enabled,
+        ):
+            generated = self.model(torch.cat((observed, masks), dim=1))
+        return generated.float()
+
+    def _perceptual_loss(
+        self,
+        composed: torch.Tensor,
+        images: torch.Tensor,
+    ) -> torch.Tensor | None:
+        if self.perceptual is None or self.perceptual_weight <= 0:
+            return None
+        return self.perceptual(composed, images)
+
+    def _train_step_stage1(self, iteration: int) -> dict[str, float]:
         samples = [self.train_dataset[index] for index in self._batch_indices(iteration)]
         images, masks = collate_samples(samples)
         images = images.to(self.device)
@@ -249,54 +397,120 @@ class Trainer:
         self.model.train()
         self.optimizer.zero_grad(set_to_none=True)
 
-        with torch.autocast(
-            device_type=self.device.type,
-            dtype=self._amp_dtype,
-            enabled=self._autocast_enabled,
-        ):
-            observed = images * (1.0 - masks)
-            generated = self.model(torch.cat((observed, masks), dim=1))
-            composed = compose_output(observed, generated, masks)
-            losses = self.loss_fn(composed, generated, images, masks)
-            total = losses["total"]
-            if self.perceptual is not None and self.perceptual_weight > 0:
-                total = total + self.perceptual_weight * self.perceptual(composed, images)
+        observed = images * (1.0 - masks)
+        generated = self._forward_generator(observed, masks)
+        composed = compose_output(observed, generated, masks)
+        losses = self.loss_fn(composed, generated, images, masks)
+        total = losses["total"]
 
-        if not bool(torch.isfinite(total).all()):
-            raise FloatingPointError(
-                f"non-finite training loss at iteration {iteration}: {float(total)}"
-            )
+        perceptual_value = self._perceptual_loss(composed, images)
+        if perceptual_value is not None:
+            total = total + self.perceptual_weight * perceptual_value
 
-        if self.scaler is not None and self.scaler.is_enabled():
-            self.scaler.scale(total).backward()
-            self.scaler.unscale_(self.optimizer)
-            grad_norm = torch.nn.utils.clip_grad_norm_(
-                self.model.parameters(), self.config.train.grad_clip
-            )
-            self.scaler.step(self.optimizer)
-            self.scaler.update()
-        else:
-            total.backward()
-            grad_norm = torch.nn.utils.clip_grad_norm_(
-                self.model.parameters(), self.config.train.grad_clip
-            )
-            self.optimizer.step()
-
-        if not bool(torch.isfinite(grad_norm).all()):
-            raise FloatingPointError(
-                f"non-finite gradient norm at iteration {iteration}: {float(grad_norm)}"
-            )
-
+        grad_norm = self._optimize(
+            total,
+            self.optimizer,
+            self.scaler,
+            self.model.parameters(),
+            iteration,
+            "generator",
+        )
         self.scheduler.step()
 
-        result = {
-            key: float(value.detach())
-            for key, value in losses.items()
-        }
+        result = {key: float(value.detach()) for key, value in losses.items()}
         result["total"] = float(total.detach())
-        result["grad_norm"] = float(grad_norm)
+        result["grad_norm"] = grad_norm
         result["lr"] = float(self.optimizer.param_groups[0]["lr"])
+        if perceptual_value is not None:
+            result["perceptual"] = float(perceptual_value.detach())
         return result
+
+    def _train_step_stage2(self, iteration: int) -> dict[str, float]:
+        if (
+            self.discriminator is None
+            or self.optimizer_d is None
+            or self.scheduler_d is None
+        ):
+            raise RuntimeError("stage-two discriminator was not initialised")
+
+        samples = [self.train_dataset[index] for index in self._batch_indices(iteration)]
+        images, masks = collate_samples(samples)
+        images = images.to(self.device)
+        masks = masks.to(self.device)
+        observed = images * (1.0 - masks)
+
+        self.model.train()
+        self.discriminator.train()
+
+        # --- discriminator step: fake samples are detached -------------------
+        with torch.no_grad():
+            generated_detached = self._forward_generator(observed, masks)
+            composed_detached = compose_output(observed, generated_detached, masks)
+
+        self.optimizer_d.zero_grad(set_to_none=True)
+        real_logits = self.discriminator(images)
+        fake_logits = self.discriminator(composed_detached.detach())
+        d_loss = hinge_d_loss(real_logits, fake_logits)
+        grad_norm_d = self._optimize(
+            d_loss,
+            self.optimizer_d,
+            self.scaler_d,
+            self.discriminator.parameters(),
+            iteration,
+            "discriminator",
+        )
+        self.scheduler_d.step()
+
+        # --- generator step: adversarial gradient through D ------------------
+        self.optimizer.zero_grad(set_to_none=True)
+        generated = self._forward_generator(observed, masks)
+        composed = compose_output(observed, generated, masks)
+        losses = self.loss_fn(composed, generated, images, masks)
+        total = losses["total"]
+
+        perceptual_value = self._perceptual_loss(composed, images)
+        if perceptual_value is not None:
+            total = total + self.perceptual_weight * perceptual_value
+
+        # Freeze D parameters so only the generator receives gradients from
+        # the adversarial term; D is updated on the next iteration.
+        for parameter in self.discriminator.parameters():
+            parameter.requires_grad_(False)
+        try:
+            fake_logits_g = self.discriminator(composed)
+        finally:
+            for parameter in self.discriminator.parameters():
+                parameter.requires_grad_(True)
+        adversarial = hinge_g_loss(fake_logits_g)
+        total = total + self.adversarial_weight * adversarial
+
+        grad_norm = self._optimize(
+            total,
+            self.optimizer,
+            self.scaler,
+            self.model.parameters(),
+            iteration,
+            "generator",
+        )
+        self.scheduler.step()
+
+        result = {key: float(value.detach()) for key, value in losses.items()}
+        result["total"] = float(total.detach())
+        result["perceptual"] = (
+            float(perceptual_value.detach()) if perceptual_value is not None else 0.0
+        )
+        result["adversarial"] = float(adversarial.detach())
+        result["d_loss"] = float(d_loss.detach())
+        result["grad_norm"] = grad_norm
+        result["grad_norm_d"] = grad_norm_d
+        result["lr"] = float(self.optimizer.param_groups[0]["lr"])
+        result["lr_d"] = float(self.optimizer_d.param_groups[0]["lr"])
+        return result
+
+    def _train_step(self, iteration: int) -> dict[str, float]:
+        if self.stage == "stage2":
+            return self._train_step_stage2(iteration)
+        return self._train_step_stage1(iteration)
 
     # -------------------------------------------------------------- persistence
     def _append_jsonl(self, name: str, entry: Mapping[str, Any]) -> None:
@@ -310,6 +524,7 @@ class Trainer:
         )
 
     def _save(self, name: str, iteration: int) -> Path:
+        best_lpips = None if math.isinf(self.best_lpips) else self.best_lpips
         return save_checkpoint(
             self.checkpoint_dir / name,
             config=self.config,
@@ -322,6 +537,11 @@ class Trainer:
             history=self.history,
             patience_count=self._patience_count,
             data_identity=self.data_identity,
+            discriminator=self.discriminator,
+            optimizer_d=self.optimizer_d,
+            scheduler_d=self.scheduler_d,
+            scaler_d=self.scaler_d,
+            best_lpips=best_lpips,
         )
 
     # -------------------------------------------------------------------- run
@@ -338,18 +558,25 @@ class Trainer:
         (self.run_dir / "val.jsonl").touch()
 
         self._write_json("config.resolved.json", self.config.model_dump(mode="json"))
-        self._write_json(
-            "environment.json",
-            {
-                "environment": environment_info(),
-                "git": git_info(),
-                "device": str(self.device),
-                "parameters": self.parameter_count,
-                "config_fingerprint": config_fingerprint(self.config),
-                "data_identity": self.data_identity,
-                "start_iteration": self.start_iteration,
-            },
-        )
+        environment: dict[str, Any] = {
+            "environment": environment_info(),
+            "git": git_info(),
+            "device": str(self.device),
+            "stage": self.stage,
+            "parameters": self.parameter_count,
+            "config_fingerprint": config_fingerprint(self.config),
+            "data_identity": self.data_identity,
+            "start_iteration": self.start_iteration,
+            "perceptual": (
+                getattr(self.perceptual, "weights_id", None)
+                if self.perceptual is not None and self.perceptual_weight > 0
+                else None
+            ),
+        }
+        if self.stage == "stage2":
+            environment["discriminator_parameters"] = self.discriminator_parameter_count
+            environment["lpips"] = type(self.lpips_metric).__name__ if self.lpips_metric else None
+        self._write_json("environment.json", environment)
 
         total = self.config.train.iterations
         if until is not None:
@@ -362,8 +589,14 @@ class Trainer:
         log_every = self.config.train.log_every
         patience = self.config.train.patience
 
+        extra = (
+            f" discriminator={self.discriminator_parameter_count:,}"
+            if self.stage == "stage2"
+            else ""
+        )
         print(
-            f"[train] device={self.device} params={self.parameter_count:,} "
+            f"[train] stage={self.stage} device={self.device} "
+            f"params={self.parameter_count:,}{extra} "
             f"iters={self.start_iteration}->{total} "
             f"batch={self.config.train.batch_size} precision={self.precision}",
             flush=True,
@@ -381,14 +614,23 @@ class Trainer:
 
             if (iteration + 1) % log_every == 0 or iteration == total - 1:
                 elapsed = time.perf_counter() - started
-                print(
+                message = (
                     f"[train] iter {iteration + 1}/{total} "
                     f"loss={metrics['total']:.6f} hole={metrics['hole']:.6f} "
-                    f"valid={metrics['valid']:.6f} tv={metrics['tv']:.6f} "
-                    f"lr={metrics['lr']:.2e} grad={metrics['grad_norm']:.3f} "
-                    f"({elapsed * 1000:.0f} ms)",
-                    flush=True,
+                    f"valid={metrics['valid']:.6f} tv={metrics['tv']:.6f}"
                 )
+                if "perceptual" in metrics:
+                    message += f" perc={metrics['perceptual']:.6f}"
+                if self.stage == "stage2":
+                    message += (
+                        f" adv={metrics['adversarial']:.6f}"
+                        f" d={metrics['d_loss']:.6f}"
+                    )
+                message += (
+                    f" lr={metrics['lr']:.2e} grad={metrics['grad_norm']:.3f}"
+                    f" ({elapsed * 1000:.0f} ms)"
+                )
+                print(message, flush=True)
 
             final_iteration = iteration + 1
 
@@ -399,31 +641,47 @@ class Trainer:
                     device=self.device,
                     batch_size=self.config.train.val_batch_size,
                     loss_fn=self.loss_fn,
+                    lpips_metric=self.lpips_metric,
                 )
                 validation["iteration"] = final_iteration
                 self.history.append(validation)
                 self._append_jsonl("val.jsonl", validation)
 
-                print(
+                message = (
                     f"[val] iter {final_iteration}/{total} "
                     f"psnr_hole={validation['psnr_hole']:.3f} "
                     f"psnr_full={validation['psnr_full']:.3f} "
                     f"ssim={validation['ssim']:.4f} "
                     f"mae_hole={validation['mae_hole']:.4f} "
-                    f"loss={validation['loss_total']:.6f}",
-                    flush=True,
+                    f"loss={validation['loss_total']:.6f}"
                 )
+                if "lpips" in validation:
+                    message += f" lpips={validation['lpips']:.4f}"
+                print(message, flush=True)
 
-                improved = validation["psnr_hole"] > self.best_psnr_hole + 1e-9
-                if improved:
+                improved_psnr = validation["psnr_hole"] > self.best_psnr_hole + 1e-9
+                if improved_psnr:
                     self.best_psnr_hole = validation["psnr_hole"]
                     no_improvement = 0
                 else:
                     no_improvement += 1
+
+                improved_lpips = (
+                    "lpips" in validation and validation["lpips"] < self.best_lpips
+                )
+                if improved_lpips:
+                    self.best_lpips = validation["lpips"]
+
                 self._patience_count = no_improvement
                 self._save("last.pt", final_iteration)
-                if improved:
-                    self._save("best.pt", final_iteration)
+                if self.stage == "stage1":
+                    if improved_psnr:
+                        self._save("best.pt", final_iteration)
+                else:
+                    if improved_psnr:
+                        self._save("best_psnr.pt", final_iteration)
+                    if improved_lpips:
+                        self._save("best_lpips.pt", final_iteration)
 
                 if no_improvement >= patience:
                     stopped_early = True
@@ -445,4 +703,6 @@ class Trainer:
             best_psnr_hole=self.best_psnr_hole,
             stopped_early=stopped_early,
             history=tuple(self.history),
+            best_lpips=None if math.isinf(self.best_lpips) else self.best_lpips,
+            stage=self.stage,
         )
