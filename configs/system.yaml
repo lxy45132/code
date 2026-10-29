@@ -1,0 +1,21 @@
+contract_version: 1
+experiment_id: system
+
+system:
+  model_id: main
+  checkpoint: ../outputs/main/seed_2026/checkpoints/best_psnr.pt
+  device: cuda
+  pad_multiple: 16
+  tiling:
+    tile_size: 512
+    tile_overlap: 64
+  history_db: ../outputs/history.sqlite
+  output_dir: ../outputs/history
+  limits:
+    max_file_mb: 20
+    max_side: 4096
+    max_pixels: 16777216
+  web:
+    host: 127.0.0.1
+    port: 8000
+  busy_timeout_s: 2.0

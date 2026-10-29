@@ -1,0 +1,30 @@
+# Local environment
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Local data and experiment artifacts (anchored to the repo root)
+/data/
+/outputs/
+*.pt
+*.pth
+*.ckpt
+*.sqlite
+*.log
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Build outputs
+dist/
+build/

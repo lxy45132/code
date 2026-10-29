@@ -1,0 +1,22 @@
+# Keep line endings stable between Windows development and Linux training.
+* text=auto
+.gitattributes text eol=lf
+
+*.py text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.toml text eol=lf
+*.sh text eol=lf
+*.json text eol=lf
+*.lock text eol=lf
+.env.example text eol=lf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.bmp binary
+*.pt binary
+*.pth binary
+*.ckpt binary

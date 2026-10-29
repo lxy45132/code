@@ -1,0 +1,61 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "hybrid-inpaint"
+version = "0.1.0"
+description = "基于 U-Net 与 Transformer 混合架构的图像修复系统"
+readme = "README.md"
+requires-python = ">=3.10,<3.11"
+dependencies = [
+  "numpy==1.26.4",
+  "Pillow==11.1.0",
+  "PyYAML==6.0.2",
+  "pydantic>=2.9,<3",
+  "typer>=0.12,<1",
+]
+
+[project.optional-dependencies]
+train = [
+  "torch==2.6.0",
+  "torchvision==0.21.0",
+  "einops==0.8.1",
+  "scikit-image==0.24.0",
+  "lpips==0.1.4",
+  "pytorch-fid==0.3.0",
+  "tensorboard>=2.16,<3",
+]
+web = [
+  "fastapi>=0.115,<1",
+  "uvicorn[standard]>=0.30,<1",
+  "gradio>=5,<6",
+  "python-multipart>=0.0.9",
+]
+gui = [
+  "PySide6>=6.7,<7",
+]
+dev = [
+  "pytest>=8.3,<9",
+  "httpx>=0.27,<1",
+]
+
+[project.scripts]
+hybrid-inpaint = "hybrid_inpaint.interfaces.cli.main:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["hybrid_inpaint"]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu124" }
+torchvision = { index = "pytorch-cu124" }
+
+[[tool.uv.index]]
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
+explicit = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+pythonpath = ["."]
