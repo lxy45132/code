@@ -52,6 +52,9 @@ uv run --no-sync hybrid-inpaint data freeze-synthetic --output-dir data/syntheti
 uv run --no-sync hybrid-inpaint data prepare --raw-dir data/raw --manifest-dir data/manifests --processed-dir data/processed --seed 2026
 uv run --no-sync hybrid-inpaint train --config configs/smoke.yaml --iterations 400
 uv run --no-sync hybrid-inpaint train --config configs/dryrun_places.yaml
+uv run --no-sync hybrid-inpaint evaluate -c configs/dryrun_places.yaml \
+  --checkpoint outputs/dryrun_places/seed_2026/checkpoints/best.pt \
+  --dataset places2 --limit 10 --output-dir outputs/eval_dryrun
 uv run --no-sync hybrid-inpaint train --config configs/smoke.yaml --resume outputs/smoke/seed_2026/checkpoints/last.pt
 # 阶段二（T0 正式数据就绪后）：从阶段一 best.pt 初始化
 # uv run --no-sync hybrid-inpaint train -c configs/experiments/main.yaml \

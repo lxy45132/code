@@ -152,8 +152,10 @@ def data_prepare(
         f"buckets={masks['bucket_counts']}"
     )
     typer.echo(
-        f"pairs: places={summaries['places_pairs']['count']} "
-        f"celeba={summaries['celeba_pairs']['count']}"
+        f"pairs: places_test={summaries['places_pairs']['count']} "
+        f"celeba_test={summaries['celeba_pairs']['count']} "
+        f"places_val={summaries['places_val_pairs']['count']} "
+        f"celeba_val={summaries['celeba_val_pairs']['count']}"
     )
     typer.echo(
         "manifest sha256: "
@@ -252,6 +254,88 @@ def train(
             )
     else:
         typer.echo(f"  best={result.run_dir / 'checkpoints' / 'best.pt'}")
+
+
+@app.command("evaluate")
+def evaluate(
+    config: Path = typer.Option(..., "--config", "-c", exists=True, dir_okay=False),
+    checkpoint: Path = typer.Option(
+        ..., "--checkpoint", exists=True, dir_okay=False
+    ),
+    dataset: str = typer.Option(
+        ..., "--dataset", help="places2 or celeba_hq"
+    ),
+    pairs: Path | None = typer.Option(
+        None,
+        "--pairs",
+        exists=True,
+        dir_okay=False,
+        help="Pair manifest; defaults to <manifest_dir>/<dataset>_test_pairs.jsonl.",
+    ),
+    output_dir: Path | None = typer.Option(
+        None, "--output-dir", file_okay=False
+    ),
+    device: str | None = typer.Option(None, "--device"),
+    limit: int | None = typer.Option(None, "--limit", min=1),
+    batch_size: int | None = typer.Option(None, "--batch-size", min=1),
+) -> None:
+    """Evaluate a checkpoint on frozen image/mask pairs."""
+    from hybrid_inpaint.training.engine.checkpoint import CheckpointError
+    from hybrid_inpaint.training.engine.evaluator import (
+        evaluate_checkpoint,
+        write_evaluation,
+    )
+
+    if dataset not in ("places2", "celeba_hq"):
+        typer.echo("[eval error] --dataset must be places2 or celeba_hq", err=True)
+        raise typer.Exit(code=2)
+    parsed = _load_or_exit(config)
+    prefix = "places365" if dataset == "places2" else "celeba_hq"
+    pair_path = pairs or (parsed.data.manifest_dir / f"{prefix}_test_pairs.jsonl")
+    target = output_dir or (Path("outputs") / "eval" / checkpoint.stem)
+
+    try:
+        result = evaluate_checkpoint(
+            parsed,
+            checkpoint,
+            pair_path,
+            dataset=dataset,
+            device=device,
+            limit=limit,
+            batch_size=batch_size,
+        )
+        pairs_path, summary_path = write_evaluation(
+            result,
+            target,
+            checkpoint=checkpoint,
+            dataset=dataset,
+            image_size=parsed.data.image_size,
+        )
+    except (
+        CheckpointError,
+        ImportError,
+        ValueError,
+        RuntimeError,
+        FileNotFoundError,
+        OSError,
+    ) as exc:
+        typer.echo(f"[eval error] {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+
+    summary = result.summary
+    typer.echo(
+        f"evaluated {summary['pairs']} pairs / {summary['images']} images "
+        f"({dataset}, image_size={parsed.data.image_size})"
+    )
+    for key in ("psnr_hole", "psnr_full", "ssim", "mae_hole", "mae_full", "lpips"):
+        stats = summary["metrics"].get(key)
+        if stats:
+            typer.echo(
+                f"  {key}: {stats['mean']:.4f} +/- {stats['std']:.4f} "
+                f"(n={stats['count']})"
+            )
+    typer.echo(f"  pairs_csv={pairs_path}")
+    typer.echo(f"  summary={summary_path}")
 
 
 @app.command("start")

@@ -285,12 +285,17 @@ class FixedPairDataset:
         *,
         dataset: str,
         image_size: int = 256,
+        limit: int | None = None,
     ) -> None:
         if dataset not in ("places2", "celeba_hq"):
             raise ValueError("dataset must be places2 or celeba_hq")
+        if limit is not None and limit < 1:
+            raise ValueError("limit must be >= 1 or None")
         self.entries = load_manifest_entries(pair_manifest)
         if not self.entries:
             raise ValueError("pair manifest must not be empty")
+        if limit is not None:
+            self.entries = self.entries[:limit]
         self.dataset = dataset
         self.image_size = image_size
 
@@ -321,6 +326,8 @@ class FixedPairDataset:
                 "mask_id": entry.get("mask_source_id"),
                 "bucket": entry.get("bucket"),
                 "bucket_range": entry.get("bucket_range"),
+                "category_id": entry.get("category_id"),
+                "category": entry.get("category"),
                 "mask_area": float(hole.mean()),
             },
         )

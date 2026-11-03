@@ -604,6 +604,7 @@ def build_test_pairs(
     dataset: str,
     seed: int = 2026,
     pairs_per_image: int = 5,
+    split: str = "test",
 ) -> dict[str, Any]:
     """Pair every test image with one fixed mask from each area bucket."""
     images = read_manifest(_resolve(image_manifest))
@@ -635,10 +636,12 @@ def build_test_pairs(
                     "sha256": image["sha256"],
                     "width": image["width"],
                     "height": image["height"],
-                    "split": "test",
+                    "split": split,
                     "source": image["source"],
                     "license": image["license"],
                     "image_source_id": image["image_id"],
+                    "category_id": image.get("category_id"),
+                    "category": image.get("category"),
                     "mask_relative_path": mask["processed_path"],
                     "mask_sha256": mask["processed_sha256"],
                     "mask_source_id": mask["image_id"],
@@ -653,7 +656,7 @@ def build_test_pairs(
         pairs,
         kind="pairs",
         dataset=dataset,
-        split="test",
+        split=split,
         seed=seed,
         source=images[0]["source"] if images else "unknown",
         license=images[0]["license"] if images else "unknown",
@@ -696,6 +699,22 @@ def prepare_all(
         dataset="celeba_hq",
         seed=seed,
     )
+    places_val_pairs = build_test_pairs(
+        manifests / "places365_val.jsonl",
+        manifests / "masks_test.jsonl",
+        manifests / "places365_val_pairs.jsonl",
+        dataset="places365",
+        seed=seed,
+        split="val",
+    )
+    celeba_val_pairs = build_test_pairs(
+        manifests / "celeba_hq_val.jsonl",
+        manifests / "masks_test.jsonl",
+        manifests / "celeba_hq_val_pairs.jsonl",
+        dataset="celeba_hq",
+        seed=seed,
+        split="val",
+    )
 
     return {
         "places": places,
@@ -703,6 +722,8 @@ def prepare_all(
         "masks": masks,
         "places_pairs": places_pairs,
         "celeba_pairs": celeba_pairs,
+        "places_val_pairs": places_val_pairs,
+        "celeba_val_pairs": celeba_val_pairs,
     }
 
 

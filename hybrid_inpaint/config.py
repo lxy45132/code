@@ -243,6 +243,7 @@ class TrainConfig(StrictModel):
 class EvalConfig(StrictModel):
     test_split: str = "test"
     masks_per_image: int = 5
+    batch_size: int = 8
     resolutions: tuple[int, ...] = (256,)
     mask_area_buckets: tuple[tuple[float, float], ...] = (
         (0.0, 0.1),
@@ -254,11 +255,11 @@ class EvalConfig(StrictModel):
     compute_lpips: bool = True
     compute_fid: bool = False
 
-    @field_validator("masks_per_image")
+    @field_validator("masks_per_image", "batch_size")
     @classmethod
     def _positive_masks(cls, value: int) -> int:
         if value < 1:
-            raise ValueError("masks_per_image must be >= 1")
+            raise ValueError("masks_per_image and batch_size must be >= 1")
         return value
 
     @field_validator("resolutions")
