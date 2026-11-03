@@ -17,13 +17,17 @@ model:
 
 data:
   dataset: celeba_hq
-  root: ../../data/celeba_hq
-  mask_dir: ../../data/masks
+  root: ../../data/raw/face/CelebAHQ-1024x1024
+  mask_dir: ../../data/raw/mask
   image_size: 256
   num_workers: 0
   train_split: train
   val_split: val
   test_split: test
+  manifest_dir: ../../data/manifests
+  processed_dir: ../../data/processed
+  manifest_train_limit: null
+  manifest_val_limit: null
 
 train:
   stage: stage2

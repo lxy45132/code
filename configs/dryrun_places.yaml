@@ -1,0 +1,66 @@
+# Small real-data Places365 dry run: engineering check, not a paper result.
+contract_version: 1
+experiment_id: dryrun_places
+seed: 2026
+
+model:
+  name: hybrid_unet_vit_dryrun
+  in_channels: 4
+  out_channels: 3
+  channels: [16, 32, 64, 128]
+  vit_depth: 2
+  vit_heads: 4
+  vit_patch: 2
+  vit_mlp_ratio: 2.0
+  norm: instance
+  dropout: 0.0
+
+data:
+  dataset: places2
+  root: ../data/raw/places365
+  mask_dir: ../data/raw/mask
+  image_size: 256
+  num_workers: 0
+  train_split: train
+  val_split: val
+  test_split: test
+  manifest_dir: ../data/manifests
+  processed_dir: ../data/processed
+  manifest_train_limit: 64
+  manifest_val_limit: 16
+
+train:
+  stage: stage1
+  iterations: 20
+  batch_size: 2
+  lr: 0.0001
+  betas: [0.5, 0.999]
+  weight_decay: 0.0
+  warmup_steps: 2
+  min_lr: 0.000001
+  grad_clip: 1.0
+  precision: bf16
+  val_every: 10
+  val_batch_size: 2
+  patience: 5
+  log_every: 5
+  seed: 2026
+  device: cuda
+  output_dir: ../outputs
+  loss:
+    l1_hole: 1.0
+    l1_valid: 0.5
+    perceptual: 0.1
+    tv: 0.05
+    adversarial: 0.1
+
+eval:
+  test_split: test
+  masks_per_image: 5
+  resolutions: [256]
+  compute_lpips: false
+  compute_fid: false
+
+system:
+  model_id: dryrun_places
+  checkpoint: ../outputs/dryrun_places/seed_2026/checkpoints/best.pt

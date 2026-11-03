@@ -271,6 +271,7 @@ class Trainer:
             payload,
             self.config,
             allow_stage_init=self.stage == "stage2",
+            data_identity=self.data_identity,
         )
 
         self.model.load_state_dict(payload["model"], strict=True)

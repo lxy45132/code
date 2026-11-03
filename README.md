@@ -4,7 +4,7 @@
 
 ## 当前状态
 
-施工中。已完成 **C0（工程骨架、配置契约、CLI、基础测试）**、**C1（合成人脸/场景数据、掩码、数据实体、冻结观测）**、**C2（纯 U-Net B0、损失、指标、训练器、checkpoint）**、**C3（瓶颈 ViT、结构开关、梯度与显存检查）** 与 **C4（PatchGAN、感知损失、两阶段训练、对抗稳定性）**；下一步 C5（固定测试、消融、高分辨率与大掩码压力测试）。
+施工中。C0–C4 已完成；**C5 进行中**：T0 真实数据（CelebA-HQ、Places365、NVIDIA 掩码）已落盘并冻结 manifest，真实数据适配器和 Places/CelebA dry run 已通过；正式 B0/B1/B2/Main 训练待 24 GB 云卡，评测 CLI 与消融待补。
 
 项目根目录：`D:\Code\bs\code`（ASCII 路径，不需要 `PYTHONUTF8` 或 `--env-file`）。
 
@@ -19,6 +19,7 @@
 - [C2 handoff](docs/handoffs/HANDOFF_C2.md)
 - [C3 handoff](docs/handoffs/HANDOFF_C3.md)
 - [C4 handoff](docs/handoffs/HANDOFF_C4.md)
+- [C5 handoff（进行中）](docs/handoffs/HANDOFF_C5.md)
 
 ## 环境
 
@@ -48,7 +49,9 @@ uv sync --extra dev --extra gui
 ```bash
 uv run --no-sync hybrid-inpaint config validate --config configs/base.yaml
 uv run --no-sync hybrid-inpaint data freeze-synthetic --output-dir data/synthetic/frozen --count 16 --size 256 --seed 2026
+uv run --no-sync hybrid-inpaint data prepare --raw-dir data/raw --manifest-dir data/manifests --processed-dir data/processed --seed 2026
 uv run --no-sync hybrid-inpaint train --config configs/smoke.yaml --iterations 400
+uv run --no-sync hybrid-inpaint train --config configs/dryrun_places.yaml
 uv run --no-sync hybrid-inpaint train --config configs/smoke.yaml --resume outputs/smoke/seed_2026/checkpoints/last.pt
 # 阶段二（T0 正式数据就绪后）：从阶段一 best.pt 初始化
 # uv run --no-sync hybrid-inpaint train -c configs/experiments/main.yaml \

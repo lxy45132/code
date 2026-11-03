@@ -99,6 +99,34 @@ def test_train_output_dir_resolves_against_yaml_directory(tmp_path: Path) -> Non
     assert config.train.output_dir == (tmp_path / "runs").resolve()
 
 
+def test_manifest_dirs_resolve_against_yaml_directory(tmp_path: Path) -> None:
+    path = write_yaml(
+        tmp_path,
+        """
+        contract_version: 1
+        data:
+          manifest_dir: manifests
+          processed_dir: processed
+        """,
+    )
+    config = load_config(path)
+    assert config.data.manifest_dir == (tmp_path / "manifests").resolve()
+    assert config.data.processed_dir == (tmp_path / "processed").resolve()
+
+
+def test_manifest_limits_must_be_positive(tmp_path: Path) -> None:
+    path = write_yaml(
+        tmp_path,
+        """
+        contract_version: 1
+        data:
+          manifest_train_limit: 0
+        """,
+    )
+    with pytest.raises(ConfigError, match="manifest_train_limit"):
+        load_config(path)
+
+
 def test_zero_train_samples_is_rejected(tmp_path: Path) -> None:
     path = write_yaml(
         tmp_path,

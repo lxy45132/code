@@ -1,0 +1,81 @@
+# Places365 B2: pure U-Net + GAN. Initialise from places_b0 stage-one best.pt.
+contract_version: 1
+experiment_id: places_b2
+seed: 2026
+
+model:
+  name: hybrid_unet_vit
+  in_channels: 4
+  out_channels: 3
+  channels: [64, 128, 256, 512]
+  vit_depth: 0
+  vit_heads: 8
+  vit_patch: 2
+  vit_mlp_ratio: 4.0
+  norm: instance
+  dropout: 0.0
+
+data:
+  dataset: places2
+  root: ../../data/raw/places365
+  mask_dir: ../../data/raw/mask
+  image_size: 256
+  num_workers: 0
+  train_split: train
+  val_split: val
+  test_split: test
+  manifest_dir: ../../data/manifests
+  processed_dir: ../../data/processed
+  manifest_train_limit: null
+  manifest_val_limit: null
+
+train:
+  stage: stage2
+  iterations: 50000
+  batch_size: 8
+  lr: 0.0001
+  betas: [0.5, 0.999]
+  weight_decay: 0.0
+  warmup_steps: 1000
+  min_lr: 0.000001
+  grad_clip: 1.0
+  precision: bf16
+  val_every: 5000
+  val_batch_size: 8
+  patience: 10
+  log_every: 10
+  seed: 2026
+  device: cuda
+  output_dir: ../../outputs
+  loss:
+    l1_hole: 1.0
+    l1_valid: 0.5
+    perceptual: 0.1
+    tv: 0.05
+    adversarial: 0.1
+
+eval:
+  test_split: test
+  masks_per_image: 5
+  resolutions: [256]
+  compute_lpips: true
+  compute_fid: false
+
+system:
+  model_id: places_b2
+  checkpoint: ../../outputs/places_b2/seed_2026/checkpoints/best_psnr.pt
+  device: cuda
+  pad_multiple: 16
+  tiling:
+    tile_size: 512
+    tile_overlap: 64
+  history_db: ../../outputs/history.sqlite
+  output_dir: ../../outputs/history
+  limits:
+    max_file_mb: 20
+    max_side: 4096
+    max_pixels: 16777216
+  web:
+    host: 127.0.0.1
+    port: 8000
+  busy_timeout_s: 2.0

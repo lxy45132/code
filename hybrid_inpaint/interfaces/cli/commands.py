@@ -108,6 +108,60 @@ def data_freeze_synthetic(
     )
 
 
+@data_app.command("prepare")
+def data_prepare(
+    raw_dir: Path = typer.Option(
+        Path("data/raw"), "--raw-dir", file_okay=False
+    ),
+    manifest_dir: Path = typer.Option(
+        Path("data/manifests"), "--manifest-dir", file_okay=False
+    ),
+    processed_dir: Path = typer.Option(
+        Path("data/processed"), "--processed-dir", file_okay=False
+    ),
+    seed: int = typer.Option(2026, "--seed", min=0),
+) -> None:
+    """Build frozen Places365/CelebA/mask manifests with SHA256 records."""
+    from hybrid_inpaint.training.data.prepare import prepare_all
+
+    try:
+        summaries = prepare_all(
+            raw_dir,
+            manifest_dir,
+            processed_dir,
+            seed=seed,
+        )
+    except (ValueError, FileNotFoundError, OSError) as exc:
+        typer.echo(f"[data error] {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+
+    places = summaries["places"]
+    celeba = summaries["celeba"]
+    masks = summaries["masks"]
+    typer.echo(
+        f"places: train={places['train']['count']} "
+        f"val={places['val']['count']} test={places['test']['count']}"
+    )
+    typer.echo(
+        f"celeba: train={celeba['train']['count']} "
+        f"val={celeba['val']['count']} test={celeba['test']['count']}"
+    )
+    typer.echo(
+        f"masks: train={masks['train']['count']} "
+        f"val={masks['val']['count']} test={masks['test']['count']} "
+        f"buckets={masks['bucket_counts']}"
+    )
+    typer.echo(
+        f"pairs: places={summaries['places_pairs']['count']} "
+        f"celeba={summaries['celeba_pairs']['count']}"
+    )
+    typer.echo(
+        "manifest sha256: "
+        f"places_train={places['train']['sha256']} "
+        f"masks_test={masks['test']['sha256']}"
+    )
+
+
 @app.command("train")
 def train(
     config: Path = typer.Option(..., "--config", "-c", exists=True, dir_okay=False),

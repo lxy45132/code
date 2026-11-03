@@ -12,6 +12,7 @@ from hybrid_inpaint.models.unet import UNet
 from hybrid_inpaint.training.engine.checkpoint import (
     CheckpointError,
     capture_rng_state,
+    check_checkpoint_compatibility,
     config_fingerprint,
     environment_info,
     load_checkpoint,
@@ -86,6 +87,39 @@ def test_round_trip_weights_only(tmp_path: Path) -> None:
     assert payload["best_metric"]["psnr_hole"] == pytest.approx(12.5)
     assert payload["data_identity"] == {"dataset": "synthetic"}
     assert set(payload["model"]) == set(model.state_dict())
+
+
+def test_data_identity_mismatch_is_rejected(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    model, optimizer, scheduler = _build(config)
+    path = tmp_path / "last.pt"
+    save_checkpoint(
+        path,
+        config=config,
+        model=model,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        scaler=None,
+        iteration=1,
+        best_psnr_hole=1.0,
+        history=[],
+        data_identity={"dataset": "synthetic", "train": "abc"},
+    )
+    payload = load_checkpoint(path, expected_config=config, restore_rng=False)
+    assert (
+        check_checkpoint_compatibility(
+            payload,
+            config,
+            data_identity={"dataset": "synthetic", "train": "abc"},
+        )
+        == "resume"
+    )
+    with pytest.raises(CheckpointError, match="data identity"):
+        check_checkpoint_compatibility(
+            payload,
+            config,
+            data_identity={"dataset": "synthetic", "train": "different"},
+        )
 
 
 def test_config_mismatch_is_rejected(tmp_path: Path) -> None:

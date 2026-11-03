@@ -104,8 +104,13 @@ class DataConfig(StrictModel):
     # Construction-time synthetic dataset sizes (ignored by real datasets).
     train_samples: int = 256
     val_samples: int = 16
+    # Frozen manifests for real datasets (places2 / celeba_hq).
+    manifest_dir: Path = Path("data/manifests")
+    processed_dir: Path = Path("data/processed")
+    manifest_train_limit: int | None = None
+    manifest_val_limit: int | None = None
 
-    @field_validator("root", "mask_dir", "split_file")
+    @field_validator("root", "mask_dir", "split_file", "manifest_dir", "processed_dir")
     @classmethod
     def _non_empty_path(cls, value: Path | None) -> Path | None:
         if value is not None and not str(value).strip():
@@ -131,6 +136,13 @@ class DataConfig(StrictModel):
     def _positive_samples(cls, value: int) -> int:
         if value < 1:
             raise ValueError("sample counts must be >= 1")
+        return value
+
+    @field_validator("manifest_train_limit", "manifest_val_limit")
+    @classmethod
+    def _positive_manifest_limits(cls, value: int | None) -> int | None:
+        if value is not None and value < 1:
+            raise ValueError("manifest limits must be >= 1 or null")
         return value
 
 
@@ -402,6 +414,8 @@ _PATH_FIELDS: tuple[tuple[str, str], ...] = (
     ("data", "root"),
     ("data", "split_file"),
     ("data", "mask_dir"),
+    ("data", "manifest_dir"),
+    ("data", "processed_dir"),
     ("train", "output_dir"),
     ("system", "checkpoint"),
     ("system", "history_db"),

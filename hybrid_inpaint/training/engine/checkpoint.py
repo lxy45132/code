@@ -100,11 +100,15 @@ def check_checkpoint_compatibility(
     config: AppConfig,
     *,
     allow_stage_init: bool = False,
+    data_identity: Mapping[str, Any] | None = None,
 ) -> str:
     """Return ``"resume"`` or ``"init"``; raise on incompatible checkpoints.
 
     ``"init"`` means a stage-one checkpoint initialises a stage-two run: the
     generator weights are loaded but iteration/optimiser state starts fresh.
+    When ``data_identity`` is supplied (manifest hashes), it must match the
+    stored identity exactly; this prevents silently resuming on a different
+    frozen split.
     """
     stage = payload.get("stage")
     if stage == config.train.stage:
@@ -114,15 +118,23 @@ def check_checkpoint_compatibility(
                 f"(stored={payload.get('config_fingerprint')!r}, "
                 f"current={config_fingerprint(config)!r})"
             )
-        return "resume"
-
-    if allow_stage_init and stage == "stage1" and config.train.stage == "stage2":
+        mode = "resume"
+    elif allow_stage_init and stage == "stage1" and config.train.stage == "stage2":
         _check_stage1_to_stage2_init(payload, config)
-        return "init"
+        mode = "init"
+    else:
+        raise CheckpointError(
+            f"checkpoint stage {stage!r} cannot be used for {config.train.stage!r}"
+        )
 
-    raise CheckpointError(
-        f"checkpoint stage {stage!r} cannot be used for {config.train.stage!r}"
-    )
+    if data_identity is not None:
+        stored = payload.get("data_identity") or {}
+        if dict(stored) != dict(data_identity):
+            raise CheckpointError(
+                "data identity mismatch; refreshing the frozen manifests changes "
+                "the data and is not allowed in this checkpoint"
+            )
+    return mode
 
 
 def capture_rng_state() -> dict[str, Any]:

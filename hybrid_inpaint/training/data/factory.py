@@ -8,10 +8,13 @@ loudly rather than silently falling back to synthetic data.
 from __future__ import annotations
 
 import hashlib
+from pathlib import Path
 from typing import Any, Sequence
 
 from hybrid_inpaint.config import AppConfig
 from hybrid_inpaint.domain.entities import Sample
+from hybrid_inpaint.training.data.manifest import PROJECT_ROOT, read_summary
+from hybrid_inpaint.training.data.manifest_dataset import ManifestInpaintDataset
 from hybrid_inpaint.training.data.synthetic import SyntheticInpaintDataset
 
 _VALIDATION_SEED_OFFSET = 7919
@@ -54,8 +57,62 @@ def build_training_datasets(
         }
         return train, val, identity
 
-    raise NotImplementedError(
-        f"dataset {config.data.dataset!r} is not available at construction time; "
-        "CelebA-HQ/Places2 adapters and frozen splits land at T0. "
-        "Use data.dataset: synthetic for C2."
-    )
+    if config.data.dataset in ("places2", "celeba_hq"):
+        prefix = "places365" if config.data.dataset == "places2" else "celeba_hq"
+        manifest_dir = Path(config.data.manifest_dir)
+        if not manifest_dir.is_absolute():
+            manifest_dir = PROJECT_ROOT / manifest_dir
+        train_manifest = manifest_dir / f"{prefix}_train.jsonl"
+        val_manifest = manifest_dir / f"{prefix}_val.jsonl"
+        train_mask_manifest = manifest_dir / "masks_train.jsonl"
+        val_mask_manifest = manifest_dir / "masks_val.jsonl"
+
+        missing = [
+            path
+            for path in (
+                train_manifest,
+                val_manifest,
+                train_mask_manifest,
+                val_mask_manifest,
+            )
+            if not path.is_file()
+        ]
+        if missing:
+            raise FileNotFoundError(
+                "missing frozen manifests: "
+                + ", ".join(str(path) for path in missing)
+                + "; run `hybrid-inpaint data prepare` first"
+            )
+
+        train = ManifestInpaintDataset(
+            train_manifest,
+            train_mask_manifest,
+            dataset=config.data.dataset,
+            image_size=config.data.image_size,
+            seed=config.seed,
+            augment=True,
+            limit=config.data.manifest_train_limit,
+        )
+        val = ManifestInpaintDataset(
+            val_manifest,
+            val_mask_manifest,
+            dataset=config.data.dataset,
+            image_size=config.data.image_size,
+            seed=config.seed,
+            augment=False,
+            limit=config.data.manifest_val_limit,
+        )
+        identity = {
+            "dataset": config.data.dataset,
+            "image_size": config.data.image_size,
+            "seed": config.seed,
+            "train_samples": len(train),
+            "val_samples": len(val),
+            "train_manifest": read_summary(train_manifest)["sha256"],
+            "val_manifest": read_summary(val_manifest)["sha256"],
+            "train_mask_manifest": read_summary(train_mask_manifest)["sha256"],
+            "val_mask_manifest": read_summary(val_mask_manifest)["sha256"],
+        }
+        return train, val, identity
+
+    raise ValueError(f"unsupported dataset: {config.data.dataset!r}")

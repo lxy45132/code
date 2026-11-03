@@ -25,6 +25,10 @@ data:
   test_split: test
   train_samples: 16
   val_samples: 8
+  manifest_dir: ../data/manifests
+  processed_dir: ../data/processed
+  manifest_train_limit: null
+  manifest_val_limit: null
 
 train:
   stage: stage1
