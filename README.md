@@ -21,6 +21,7 @@
 - [C4 handoff](docs/handoffs/HANDOFF_C4.md)
 - [C5 handoff（进行中）](docs/handoffs/HANDOFF_C5.md)
 - [实验矩阵与运行手册](docs/EXPERIMENT_MATRIX.md)
+- [给下一个 Agent 的详细交接文档](docs/handoffs/HANDOFF_NEXT_AGENT.md)
 
 ## 环境
 
