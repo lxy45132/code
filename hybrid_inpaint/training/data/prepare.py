@@ -644,6 +644,8 @@ def build_test_pairs(
                     "category": image.get("category"),
                     "mask_relative_path": mask["processed_path"],
                     "mask_sha256": mask["processed_sha256"],
+                    "mask_relative_path_512": mask["relative_path"],
+                    "mask_sha256_512": mask["sha256"],
                     "mask_source_id": mask["image_id"],
                     "mask_area_256": mask["area_256"],
                     "bucket": bucket,
@@ -665,6 +667,72 @@ def build_test_pairs(
             "images": len(images),
             "masks": len(masks),
             "buckets": [label for _, _, label in MASK_BUCKETS],
+        },
+    )
+
+
+def build_stress_pairs(
+    image_manifest: str | Path,
+    mask_manifest: str | Path,
+    output_path: str | Path,
+    *,
+    dataset: str,
+    seed: int = 2026,
+    count: int = 2000,
+) -> dict[str, Any]:
+    """Pair test images with one 40%-60% mask each for the stress table."""
+    images = read_manifest(_resolve(image_manifest))[:count]
+    masks = [
+        mask
+        for mask in read_manifest(_resolve(mask_manifest))
+        if int(mask.get("bucket", -1)) == 4
+        and float(mask.get("area_256", 0.0)) >= 0.4
+    ]
+    if not images or not masks:
+        raise ValueError("stress pairs need images and 40%-60% masks")
+    dataset_tag = (11001 if dataset == "places365" else 22002) + 500
+    pairs: list[dict[str, Any]] = []
+    for image_index, image in enumerate(images):
+        rng = np.random.default_rng(
+            np.random.SeedSequence([seed, dataset_tag, image_index, 4])
+        )
+        mask = masks[int(rng.integers(0, len(masks)))]
+        pairs.append(
+            {
+                "image_id": f"{image['image_id']}--stress",
+                "relative_path": image["relative_path"],
+                "sha256": image["sha256"],
+                "width": image["width"],
+                "height": image["height"],
+                "split": "stress",
+                "source": image["source"],
+                "license": image["license"],
+                "image_source_id": image["image_id"],
+                "category_id": image.get("category_id"),
+                "category": image.get("category"),
+                "mask_relative_path": mask["processed_path"],
+                "mask_sha256": mask["processed_sha256"],
+                "mask_relative_path_512": mask["relative_path"],
+                "mask_sha256_512": mask["sha256"],
+                "mask_source_id": mask["image_id"],
+                "mask_area_256": mask["area_256"],
+                "bucket": 4,
+                "bucket_range": MASK_BUCKETS[4][2],
+            }
+        )
+    return write_manifest(
+        _resolve(output_path),
+        pairs,
+        kind="pairs",
+        dataset=dataset,
+        split="stress",
+        seed=seed,
+        source=images[0]["source"],
+        license=images[0]["license"],
+        extra={
+            "pairs_per_image": 1,
+            "images": len(images),
+            "mask_area_range": "[40,60%]",
         },
     )
 
@@ -715,6 +783,22 @@ def prepare_all(
         seed=seed,
         split="val",
     )
+    places_stress_pairs = build_stress_pairs(
+        manifests / "places365_test.jsonl",
+        manifests / "masks_test.jsonl",
+        manifests / "places365_stress_pairs.jsonl",
+        dataset="places365",
+        seed=seed,
+        count=2000,
+    )
+    celeba_stress_pairs = build_stress_pairs(
+        manifests / "celeba_hq_test.jsonl",
+        manifests / "masks_test.jsonl",
+        manifests / "celeba_hq_stress_pairs.jsonl",
+        dataset="celeba_hq",
+        seed=seed,
+        count=2000,
+    )
 
     return {
         "places": places,
@@ -724,6 +808,8 @@ def prepare_all(
         "celeba_pairs": celeba_pairs,
         "places_val_pairs": places_val_pairs,
         "celeba_val_pairs": celeba_val_pairs,
+        "places_stress_pairs": places_stress_pairs,
+        "celeba_stress_pairs": celeba_stress_pairs,
     }
 
 

@@ -27,6 +27,7 @@ from hybrid_inpaint.models.generator import build_generator
 from hybrid_inpaint.models.unet import compose_output
 from hybrid_inpaint.training.data.manifest_dataset import FixedPairDataset
 from hybrid_inpaint.training.engine.checkpoint import load_checkpoint
+from hybrid_inpaint.training.engine.tiling import inpaint_tiled
 from hybrid_inpaint.training.engine.validator import collate_samples
 from hybrid_inpaint.training.metrics.image import evaluate_image
 
@@ -158,11 +159,29 @@ def evaluate_checkpoint(
     device: str | None = None,
     limit: int | None = None,
     batch_size: int | None = None,
+    image_size: int | None = None,
+    tile_size: int | None = None,
+    tile_overlap: int = 64,
     lpips_metric: Any | None = None,
 ) -> EvaluationResult:
     """Evaluate one checkpoint on a frozen pair manifest."""
     if dataset not in ("places2", "celeba_hq"):
         raise ValueError("dataset must be places2 or celeba_hq")
+    image_size = image_size or config.data.image_size
+    if image_size < 16 or image_size % 16:
+        raise ValueError("image_size must be >= 16 and a multiple of 16")
+    if dataset == "places2" and image_size > 256:
+        raise ValueError(
+            "Places365 source images are 256x256; high-resolution Places "
+            "evaluation requires the official large archive"
+        )
+    if tile_size is None and image_size >= 512:
+        tile_size = 512
+    if tile_size is not None:
+        if tile_size < 16 or tile_size % 16:
+            raise ValueError("tile_size must be >= 16 and a multiple of 16")
+        if not 0 <= tile_overlap < tile_size:
+            raise ValueError("require 0 <= tile_overlap < tile_size")
 
     payload = load_checkpoint(
         checkpoint,
@@ -180,7 +199,7 @@ def evaluate_checkpoint(
     dataset_obj = FixedPairDataset(
         pair_manifest,
         dataset=dataset,
-        image_size=config.data.image_size,
+        image_size=image_size,
         limit=limit,
     )
 
@@ -202,7 +221,55 @@ def evaluate_checkpoint(
     )
 
     rows: list[dict[str, Any]] = []
-    with torch.inference_mode():
+
+    def _append_row(sample: Any, metrics: dict[str, float]) -> None:
+        rows.append(
+            {
+                "image_id": sample.meta.get("image_id"),
+                "category_id": sample.meta.get("category_id"),
+                "category": sample.meta.get("category"),
+                "bucket": sample.meta.get("bucket"),
+                "bucket_range": sample.meta.get("bucket_range"),
+                "mask_area": sample.meta.get("mask_area"),
+                "mask_id": sample.meta.get("mask_id"),
+                **metrics,
+            }
+        )
+
+    if tile_size is not None:
+        for index in range(len(dataset_obj)):
+            sample = dataset_obj[index]
+            image = sample.image.data.astype(np.float32) / 255.0
+            hole = sample.mask.data
+            prediction = inpaint_tiled(
+                model,
+                image,
+                hole,
+                device=resolved_device,
+                tile_size=tile_size,
+                tile_overlap=tile_overlap,
+                amp_dtype=amp_dtype,
+                amp_enabled=amp_enabled,
+            )
+            metrics = evaluate_image(prediction, image, hole)
+            if lpips_metric is not None:
+                prediction_tensor = (
+                    torch.from_numpy(prediction)
+                    .permute(2, 0, 1)
+                    .unsqueeze(0)
+                    .to(resolved_device)
+                )
+                target_tensor = (
+                    torch.from_numpy(image)
+                    .permute(2, 0, 1)
+                    .unsqueeze(0)
+                    .to(resolved_device)
+                )
+                metrics["lpips"] = float(
+                    lpips_metric(prediction_tensor, target_tensor)
+                )
+            _append_row(sample, metrics)
+    else:
         for start in range(0, len(dataset_obj), batch_size):
             samples = [
                 dataset_obj[index]
@@ -239,20 +306,75 @@ def evaluate_checkpoint(
                             images[index : index + 1],
                         )
                     )
-                rows.append(
-                    {
-                        "image_id": sample.meta.get("image_id"),
-                        "category_id": sample.meta.get("category_id"),
-                        "category": sample.meta.get("category"),
-                        "bucket": sample.meta.get("bucket"),
-                        "bucket_range": sample.meta.get("bucket_range"),
-                        "mask_area": sample.meta.get("mask_area"),
-                        "mask_id": sample.meta.get("mask_id"),
-                        **metrics,
-                    }
-                )
+                _append_row(sample, metrics)
 
     return EvaluationResult(rows=tuple(rows), summary=_aggregate(rows))
+
+
+def _format_stat(stat: Mapping[str, Any] | None) -> str:
+    if not stat:
+        return "-"
+    return f"{stat['mean']:.4f} ± {stat['std']:.4f}"
+
+
+def _markdown_report(summary: Mapping[str, Any]) -> str:
+    metrics = list(summary["metrics"].keys())
+    lines = [
+        "# Evaluation summary",
+        "",
+        f"- checkpoint: `{summary['checkpoint']}`",
+        f"- dataset: `{summary['dataset']}`",
+        f"- image_size: {summary['image_size']}",
+        f"- images: {summary['images']}",
+        f"- pairs: {summary['pairs']}",
+        "",
+        "## Overall",
+        "",
+        "| metric | mean | std | n |",
+        "|---|---:|---:|---:|",
+    ]
+    for key in metrics:
+        stat = summary["metrics"].get(key)
+        if stat:
+            lines.append(
+                f"| {key} | {stat['mean']:.4f} | {stat['std']:.4f} | {stat['count']} |"
+            )
+
+    by_bucket = summary.get("by_bucket") or {}
+    if by_bucket:
+        lines += [
+            "",
+            "## By mask area",
+            "",
+            "| bucket | range | images | " + " | ".join(metrics) + " |",
+            "|---:|---|---:|" + "---:|" * len(metrics),
+        ]
+        for bucket in sorted(by_bucket, key=int):
+            row = by_bucket[bucket]
+            cells = " | ".join(
+                _format_stat(row["metrics"].get(key)) for key in metrics
+            )
+            lines.append(
+                f"| {bucket} | {row.get('bucket_range') or '-'} | "
+                f"{row.get('images', 0)} | {cells} |"
+            )
+
+    by_category = summary.get("by_category") or {}
+    if by_category:
+        lines += [
+            "",
+            "## By category",
+            "",
+            "| category | images | " + " | ".join(metrics) + " |",
+            "|---|---:|" + "---:|" * len(metrics),
+        ]
+        for category, row in sorted(by_category.items()):
+            cells = " | ".join(
+                _format_stat(row["metrics"].get(key)) for key in metrics
+            )
+            lines.append(f"| {category} | {row.get('images', 0)} | {cells} |")
+    lines.append("")
+    return "\n".join(lines)
 
 
 def write_evaluation(
@@ -262,8 +384,8 @@ def write_evaluation(
     checkpoint: str | Path,
     dataset: str,
     image_size: int,
-) -> tuple[Path, Path]:
-    """Write per-pair CSV and summary JSON; return their paths."""
+) -> tuple[Path, Path, Path]:
+    """Write per-pair CSV, summary JSON and Markdown; return their paths."""
     target = Path(output_dir)
     target.mkdir(parents=True, exist_ok=True)
 
@@ -290,4 +412,6 @@ def write_evaluation(
         json.dumps(summary, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    return pairs_path, summary_path
+    markdown_path = target / "summary.md"
+    markdown_path.write_text(_markdown_report(summary), encoding="utf-8")
+    return pairs_path, summary_path, markdown_path

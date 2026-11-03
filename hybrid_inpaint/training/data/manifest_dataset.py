@@ -55,6 +55,8 @@ def load_manifest_entries(path: str | Path) -> list[dict[str, Any]]:
             item["processed_path_full"] = resolve_relative(item["processed_path"])
         if "mask_relative_path" in item:
             item["mask_path"] = resolve_relative(item["mask_relative_path"])
+        if "mask_relative_path_512" in item:
+            item["mask_path_512"] = resolve_relative(item["mask_relative_path_512"])
         entries.append(item)
     return entries
 
@@ -314,7 +316,12 @@ class FixedPairDataset:
                 image_size=self.image_size,
                 training=False,
             )
-        hole = prepare_fixed_mask(entry["mask_path"], image_size=self.image_size)
+        mask_path = entry["mask_path"]
+        if self.image_size > 256 and "mask_path_512" in entry:
+            # Preserve the original 512x512 official mask for high-resolution
+            # evaluation instead of upscaling the 256 preprocessing output.
+            mask_path = entry["mask_path_512"]
+        hole = prepare_fixed_mask(mask_path, image_size=self.image_size)
         return Sample(
             sample_id=str(entry["image_id"]),
             image=DomainImage(np.asarray(image, dtype=np.uint8)),

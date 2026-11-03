@@ -155,7 +155,9 @@ def data_prepare(
         f"pairs: places_test={summaries['places_pairs']['count']} "
         f"celeba_test={summaries['celeba_pairs']['count']} "
         f"places_val={summaries['places_val_pairs']['count']} "
-        f"celeba_val={summaries['celeba_val_pairs']['count']}"
+        f"celeba_val={summaries['celeba_val_pairs']['count']} "
+        f"places_stress={summaries['places_stress_pairs']['count']} "
+        f"celeba_stress={summaries['celeba_stress_pairs']['count']}"
     )
     typer.echo(
         "manifest sha256: "
@@ -184,6 +186,12 @@ def train(
         min=1,
         help="Override train.iterations.",
     ),
+    seed: int | None = typer.Option(
+        None,
+        "--seed",
+        min=0,
+        help="Override the experiment and training seed.",
+    ),
     resume: Path | None = typer.Option(
         None,
         "--resume",
@@ -208,6 +216,9 @@ def train(
         train_overrides["device"] = device
     if iterations is not None:
         train_overrides["iterations"] = iterations
+    if seed is not None:
+        overrides["seed"] = seed
+        train_overrides["seed"] = seed
     if train_overrides:
         overrides["train"] = train_overrides
 
@@ -278,6 +289,9 @@ def evaluate(
     device: str | None = typer.Option(None, "--device"),
     limit: int | None = typer.Option(None, "--limit", min=1),
     batch_size: int | None = typer.Option(None, "--batch-size", min=1),
+    image_size: int | None = typer.Option(None, "--image-size", min=16),
+    tile_size: int | None = typer.Option(None, "--tile-size", min=16),
+    tile_overlap: int = typer.Option(64, "--tile-overlap", min=0),
 ) -> None:
     """Evaluate a checkpoint on frozen image/mask pairs."""
     from hybrid_inpaint.training.engine.checkpoint import CheckpointError
@@ -303,13 +317,16 @@ def evaluate(
             device=device,
             limit=limit,
             batch_size=batch_size,
+            image_size=image_size,
+            tile_size=tile_size,
+            tile_overlap=tile_overlap,
         )
-        pairs_path, summary_path = write_evaluation(
+        pairs_path, summary_path, markdown_path = write_evaluation(
             result,
             target,
             checkpoint=checkpoint,
             dataset=dataset,
-            image_size=parsed.data.image_size,
+            image_size=image_size or parsed.data.image_size,
         )
     except (
         CheckpointError,
@@ -325,7 +342,7 @@ def evaluate(
     summary = result.summary
     typer.echo(
         f"evaluated {summary['pairs']} pairs / {summary['images']} images "
-        f"({dataset}, image_size={parsed.data.image_size})"
+        f"({dataset}, image_size={image_size or parsed.data.image_size})"
     )
     for key in ("psnr_hole", "psnr_full", "ssim", "mae_hole", "mae_full", "lpips"):
         stats = summary["metrics"].get(key)
@@ -336,6 +353,7 @@ def evaluate(
             )
     typer.echo(f"  pairs_csv={pairs_path}")
     typer.echo(f"  summary={summary_path}")
+    typer.echo(f"  markdown={markdown_path}")
 
 
 @app.command("start")

@@ -169,7 +169,7 @@ def test_evaluate_checkpoint_and_write_files(tmp_path: Path) -> None:
     assert set(summary["by_bucket"]) == {"0", "1", "2", "3", "4"}
     assert summary["by_category"]["badlands"]["images"] == 2
 
-    pairs_path, summary_path = write_evaluation(
+    pairs_path, summary_path, markdown_path = write_evaluation(
         result,
         tmp_path / "eval",
         checkpoint=checkpoint,
@@ -178,7 +178,29 @@ def test_evaluate_checkpoint_and_write_files(tmp_path: Path) -> None:
     )
     assert pairs_path.is_file()
     assert summary_path.is_file()
+    assert markdown_path.is_file()
     assert "pairs.csv" in pairs_path.name
+    assert "## Overall" in markdown_path.read_text(encoding="utf-8")
+
+
+def test_tiled_evaluation_path(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    checkpoint = _save_checkpoint(tmp_path, config)
+    pairs = _pairs(tmp_path)
+    result = evaluate_checkpoint(
+        config,
+        checkpoint,
+        pairs,
+        dataset="places2",
+        device="cpu",
+        image_size=128,
+        tile_size=32,
+        tile_overlap=8,
+        limit=5,
+    )
+    assert result.summary["pairs"] == 5
+    assert result.summary["images"] == 1
+    assert result.summary["metrics"]["psnr_hole"] is not None
 
 
 def test_limit_truncates_pairs(tmp_path: Path) -> None:
