@@ -19,6 +19,9 @@ __pycache__/
 *.sqlite
 *.log
 
+# Project documentation is maintained locally only (not versioned)
+/docs/
+
 # Editors / OS
 .idea/
 .vscode/
