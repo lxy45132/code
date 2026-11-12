@@ -1,8 +1,7 @@
 """CLI commands.
 
-C0 only implements ``config validate``; the other commands are registered now
-so the command surface is stable, but they exit with code 3 until the
-corresponding construction step lands.
+config/data/train/evaluate/inpaint/run 已实现；start/gui 等待 C7/C8，
+在对应施工步骤落地前以退出码 3 提示。
 """
 
 from __future__ import annotations
@@ -374,16 +373,81 @@ def gui(
     _not_implemented("gui", "C8")
 
 
+class _CliProgressReporter:
+    def start(self, total: int) -> None:
+        typer.echo(f"batch: {total} item(s)")
+
+    def item(self, index: int, item: Any, result: Any) -> None:
+        typer.echo(f"  [{index + 1}] {item.relative_path}: {result.status}")
+
+    def finish(self, report: Any) -> None:
+        typer.echo(
+            f"batch {report.batch_id}: ok={report.ok} failed={report.failed} "
+            f"cancelled={report.cancelled}"
+        )
+
+
+def _write_batch_report(path: Path, report: Any) -> None:
+    import csv
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(
+            ["relative_path", "mask_path", "status", "output_path",
+             "latency_ms", "mask_ratio", "error"]
+        )
+        for result in report.results:
+            writer.writerow(
+                [
+                    result.relative_path,
+                    result.mask_path or "",
+                    result.status,
+                    result.output_path or "",
+                    f"{result.latency_ms:.3f}" if result.latency_ms is not None else "",
+                    f"{result.mask_ratio:.6f}" if result.mask_ratio is not None else "",
+                    result.error or "",
+                ]
+            )
+
+
 @app.command("run")
 def run(
     input_dir: Path = typer.Option(..., "--input-dir", exists=True, file_okay=False),
     mask_dir: Path = typer.Option(..., "--mask-dir", exists=True, file_okay=False),
     output_dir: Path = typer.Option(..., "--output-dir", file_okay=False),
     config: Path = typer.Option(..., "--config", "-c", exists=True, dir_okay=False),
+    recursive: bool = typer.Option(False, "--recursive"),
+    overwrite: bool = typer.Option(False, "--overwrite"),
+    limit: int | None = typer.Option(None, "--limit", min=1),
+    report: Path | None = typer.Option(None, "--report", dir_okay=False),
+    device: str | None = typer.Option(None, "--device"),
 ) -> None:
     """Batch inpaint a directory of images and masks."""
-    _load_or_exit(config)
-    _not_implemented("run", "C6")
+    from hybrid_inpaint.bootstrap import build_container
+    from hybrid_inpaint.domain.entities import BatchRequest
+    from hybrid_inpaint.domain.errors import AppError
+
+    overrides = {"system": {"device": device}} if device else None
+    try:
+        container = build_container(config, overrides)
+        batch_report = container.batch.execute(
+            BatchRequest(input_dir, mask_dir, output_dir, recursive, overwrite, limit),
+            reporter=_CliProgressReporter(),
+        )
+        report_path = report or (output_dir / "report.csv")
+        _write_batch_report(report_path, batch_report)
+    except ConfigError as exc:
+        typer.echo(f"[config error] {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+    except AppError as exc:
+        typer.echo(f"[{exc.code}] {exc.user_message}", err=True)
+        raise typer.Exit(code=exc.exit_code) from exc
+    except OSError as exc:
+        typer.echo(f"[io error] {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(f"report={report_path}")
+    raise typer.Exit(code=1 if batch_report.failed else 0)
 
 
 @app.command("inpaint")
@@ -392,7 +456,37 @@ def inpaint(
     mask: Path = typer.Option(..., "--mask", exists=True, dir_okay=False),
     output: Path = typer.Option(..., "--output", dir_okay=False),
     config: Path = typer.Option(..., "--config", "-c", exists=True, dir_okay=False),
+    device: str | None = typer.Option(None, "--device", help="Override system.device."),
+    note: str = typer.Option("", "--note"),
 ) -> None:
     """Inpaint a single image."""
-    _load_or_exit(config)
-    _not_implemented("inpaint", "C6")
+    from hybrid_inpaint.bootstrap import build_container
+    from hybrid_inpaint.domain.entities import InpaintRequest
+    from hybrid_inpaint.domain.errors import AppError
+
+    overrides = {"system": {"device": device}} if device else None
+    try:
+        container = build_container(config, overrides)
+        decoded = container.codec.decode(image.read_bytes(), container.limits)
+        mask_obj = container.codec.decode_mask(
+            mask.read_bytes(), height=decoded.height, width=decoded.width
+        )
+        result = container.inpaint.execute(
+            InpaintRequest(decoded, mask_obj, mode="cli", note=note)
+        )
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(container.codec.encode_png(result.image))
+    except ConfigError as exc:
+        typer.echo(f"[config error] {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+    except AppError as exc:
+        typer.echo(f"[{exc.code}] {exc.user_message}", err=True)
+        raise typer.Exit(code=exc.exit_code) from exc
+    except OSError as exc:
+        typer.echo(f"[io error] {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(
+        f"job_id={result.job_id} latency_ms={result.latency_ms:.1f} "
+        f"model_version={result.model_version} mask_ratio={result.mask_ratio:.4f}"
+    )
+    typer.echo(f"output={output}")
