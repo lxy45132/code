@@ -27,6 +27,13 @@ config_app = typer.Typer(
 )
 app.add_typer(config_app, name="config")
 
+db_app = typer.Typer(
+    name="db",
+    no_args_is_help=True,
+    help="Database utilities (init / migrate).",
+)
+app.add_typer(db_app, name="db")
+
 data_app = typer.Typer(
     name="data",
     no_args_is_help=True,
@@ -84,6 +91,89 @@ def config_validate(
         f"  system.device={parsed.system.device} "
         f"checkpoint={parsed.system.checkpoint}"
     )
+
+
+@db_app.command("init")
+def db_init(
+    config: Path = typer.Option(..., "--config", "-c", exists=True, dir_okay=False),
+) -> None:
+    """Create the database and run Alembic migrations to head."""
+    import re
+
+    parsed = _load_or_exit(config)
+    backend = parsed.system.storage.backend
+    project_root = Path(__file__).resolve().parents[3]
+    try:
+        if backend == "mysql":
+            import pymysql
+            from pymysql.err import Error as MySqlError
+
+            mysql = parsed.system.storage.mysql
+            if not re.fullmatch(r"[A-Za-z0-9_]+", mysql.database):
+                typer.echo(
+                    f"[db error] database name must be alnum/underscore: "
+                    f"{mysql.database}",
+                    err=True,
+                )
+                raise typer.Exit(code=2)
+            try:
+                connection = pymysql.connect(
+                    host=mysql.host,
+                    port=mysql.port,
+                    user=mysql.user,
+                    password=mysql.password,
+                )
+            except MySqlError as exc:
+                typer.echo(
+                    f"[db error] cannot reach MySQL at {mysql.host}:{mysql.port}: "
+                    f"{exc}",
+                    err=True,
+                )
+                raise typer.Exit(code=2) from exc
+            try:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        f"CREATE DATABASE IF NOT EXISTS `{mysql.database}` "
+                        "CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
+                    )
+            finally:
+                connection.close()
+        _upgrade_to_head(project_root, parsed)
+    except ImportError as exc:
+        typer.echo(
+            f"[db error] web/db dependencies missing ({exc}); "
+            "run: uv sync --extra dev --extra train --extra web",
+            err=True,
+        )
+        raise typer.Exit(code=2) from exc
+    except (OSError, RuntimeError) as exc:
+        typer.echo(f"[db error] {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+
+    typer.echo(f"database ready (backend={backend})")
+
+
+def _upgrade_to_head(project_root: Path, parsed: AppConfig) -> None:
+    """Apply schema: Alembic ``upgrade head`` (mysql) or metadata (sqlite)."""
+    if parsed.system.storage.backend == "sqlite":
+        # Alembic 管的是 MySQL schema；SQLite 后端复用同一 ORM 元数据建表。
+        from sqlalchemy import create_engine
+
+        from hybrid_inpaint.infrastructure.sqlalchemy_history import ensure_schema
+
+        db_path = parsed.system.history_db
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        ensure_schema(create_engine(f"sqlite:///{db_path}"))
+        return
+    from alembic import command
+    from alembic.config import Config as AlembicConfig
+
+    alembic_ini = project_root / "alembic.ini"
+    if not alembic_ini.is_file():
+        raise RuntimeError(f"alembic.ini not found at {alembic_ini}")
+    alembic_cfg = AlembicConfig(str(alembic_ini))
+    alembic_cfg.set_main_option("script_location", str(project_root / "alembic"))
+    command.upgrade(alembic_cfg, "head")
 
 
 @data_app.command("freeze-synthetic")

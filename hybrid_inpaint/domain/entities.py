@@ -210,3 +210,32 @@ class BatchReport:
             for r in self.results
             if r.status in ("missing_mask", "invalid_image", "invalid_mask", "error")
         )
+
+
+@dataclass(frozen=True)
+class BatchJobState:
+    """Web 批量任务权威状态（MySQL/SQLite，03 文档 §6）。"""
+
+    batch_id: str
+    status: Literal["queued", "running", "succeeded", "failed", "cancelled"]
+    total: int
+    done: int
+    failed: int
+    created_at: datetime
+    finished_at: datetime | None = None
+    report_path: str | None = None
+    note: str | None = None
+
+
+@dataclass(frozen=True)
+class BatchItemState:
+    """批量单项状态；pending 为初始态，其余为终态。"""
+
+    batch_id: str
+    item_index: int
+    image_name: str
+    status: Literal["pending", "ok", "failed", "cancelled", "skipped"]
+    job_id: str | None = None
+    error_code: str | None = None
+    latency_ms: float | None = None
+    mask_ratio: float | None = None

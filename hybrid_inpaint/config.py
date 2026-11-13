@@ -316,13 +316,129 @@ class LimitsConfig(StrictModel):
 class WebConfig(StrictModel):
     host: str = "127.0.0.1"
     port: int = 8000
-    mount_gradio: bool = True
+    workers: int = 1
 
     @field_validator("port")
     @classmethod
     def _valid_port(cls, value: int) -> int:
         if not 1 <= value <= 65535:
             raise ValueError("port must be in [1, 65535]")
+        return value
+
+    @field_validator("workers")
+    @classmethod
+    def _valid_workers(cls, value: int) -> int:
+        if not 1 <= value <= 16:
+            raise ValueError("workers must be in [1, 16]")
+        return value
+
+    @field_validator("host")
+    @classmethod
+    def _non_empty_host(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("host must not be empty")
+        return value
+
+
+class InferenceConfig(StrictModel):
+    mode: Literal["inline", "worker"] = "inline"
+    chunk_size: int = 8
+
+    @field_validator("chunk_size")
+    @classmethod
+    def _valid_chunk_size(cls, value: int) -> int:
+        if not 1 <= value <= 64:
+            raise ValueError("chunk_size must be in [1, 64]")
+        return value
+
+
+class MySqlConfig(StrictModel):
+    host: str = "127.0.0.1"
+    port: int = 3306
+    user: str = "hybrid"
+    password: str = ""
+    database: str = "hybrid_inpaint"
+
+    @field_validator("port")
+    @classmethod
+    def _valid_port(cls, value: int) -> int:
+        if not 1 <= value <= 65535:
+            raise ValueError("port must be in [1, 65535]")
+        return value
+
+    @field_validator("host", "user", "database")
+    @classmethod
+    def _non_empty(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("mysql host/user/database must not be empty")
+        return value
+
+
+class StorageConfig(StrictModel):
+    backend: Literal["mysql", "sqlite"] = "sqlite"
+    mysql: MySqlConfig = Field(default_factory=MySqlConfig)
+
+
+class RedisConfig(StrictModel):
+    url: str = "redis://127.0.0.1:6379/0"
+
+    @field_validator("url")
+    @classmethod
+    def _valid_redis_url(cls, value: str) -> str:
+        if not (value.startswith("redis://") or value.startswith("rediss://")):
+            raise ValueError("redis.url must start with redis:// or rediss://")
+        return value
+
+
+class CeleryConfig(StrictModel):
+    broker_db: int = 1
+    result_db: int = 2
+    retries: int = 3
+
+    @field_validator("broker_db", "result_db")
+    @classmethod
+    def _valid_db(cls, value: int) -> int:
+        if not 0 <= value <= 15:
+            raise ValueError("celery db indexes must be in [0, 15]")
+        return value
+
+    @field_validator("retries")
+    @classmethod
+    def _non_negative_retries(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("retries must be >= 0")
+        return value
+
+
+class BatchConfig(StrictModel):
+    max_items: int = 32
+
+    @field_validator("max_items")
+    @classmethod
+    def _valid_max_items(cls, value: int) -> int:
+        if not 1 <= value <= 256:
+            raise ValueError("max_items must be in [1, 256]")
+        return value
+
+
+class ApiConfig(StrictModel):
+    title: str = "Hybrid Inpaint API"
+    cors_origins: tuple[str, ...] = ("http://localhost:5173",)
+    api_key: str | None = None
+
+    @field_validator("title")
+    @classmethod
+    def _non_empty_title(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("api.title must not be empty")
+        return value
+
+    @field_validator("cors_origins")
+    @classmethod
+    def _valid_origins(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        for origin in value:
+            if not (origin.startswith("http://") or origin.startswith("https://")):
+                raise ValueError("cors origins must start with http:// or https://")
         return value
 
 
@@ -357,6 +473,12 @@ class SystemConfig(StrictModel):
     limits: LimitsConfig = Field(default_factory=LimitsConfig)
     web: WebConfig = Field(default_factory=WebConfig)
     busy_timeout_s: float = 2.0
+    inference: InferenceConfig = Field(default_factory=InferenceConfig)
+    storage: StorageConfig = Field(default_factory=StorageConfig)
+    redis: RedisConfig = Field(default_factory=RedisConfig)
+    celery: CeleryConfig = Field(default_factory=CeleryConfig)
+    batch: BatchConfig = Field(default_factory=BatchConfig)
+    api: ApiConfig = Field(default_factory=ApiConfig)
 
     @field_validator("model_id")
     @classmethod
@@ -381,9 +503,12 @@ class SystemConfig(StrictModel):
 
     @field_validator("busy_timeout_s")
     @classmethod
-    def _non_negative_timeout(cls, value: float) -> float:
-        if not math.isfinite(value) or value < 0:
-            raise ValueError("busy_timeout_s must be finite and >= 0")
+    def _valid_timeout(cls, value: float) -> float:
+        # -1 means "queue and wait indefinitely" (FIFO, no 503 rejection).
+        if not math.isfinite(value) and value != -1:
+            raise ValueError("busy_timeout_s must be finite or -1")
+        if value < -1:
+            raise ValueError("busy_timeout_s must be >= -1")
         return value
 
 

@@ -44,12 +44,37 @@ class Container:
     model_service: ModelService
 
 
+def _build_history(config: AppConfig) -> HistoryRepository:
+    """Select the history adapter by system.storage.backend (03 文档 §6).
+
+    mysql 后端返回 SQLAlchemy 适配器（建表依赖 alembic upgrade head，
+    由 ``db init`` / 部署脚本负责）；sqlite 后端保持原零依赖行为。
+    """
+    if config.system.storage.backend == "mysql":
+        from hybrid_inpaint.infrastructure.sqlalchemy_history import (
+            SqlAlchemyHistoryRepository,
+            build_mysql_engine,
+        )
+
+        mysql = config.system.storage.mysql
+        engine = build_mysql_engine(
+            mysql.host, mysql.port, mysql.user, mysql.password, mysql.database
+        )
+        return SqlAlchemyHistoryRepository(
+            engine, paths_base=config.system.output_dir.parent
+        )
+    return SqliteHistoryRepository(
+        config.system.history_db, paths_base=config.system.output_dir.parent
+    )
+
+
 def build_container(
     config_path: str | Path,
     overrides: dict[str, Any] | None = None,
     *,
     engine: InpaintEngine | None = None,
     codec: ImageCodec | None = None,
+    history: HistoryRepository | None = None,
 ) -> Container:
     config = load_config(config_path, overrides)
     setup_logging(config.system.history_db.parent / "system.log")
@@ -62,9 +87,8 @@ def build_container(
     clock = SystemClock()
     ids = UuidGenerator()
     artifacts = FileSystemArtifactStore(config.system.output_dir, resolved_codec)
-    history = SqliteHistoryRepository(
-        config.system.history_db, paths_base=config.system.output_dir.parent
-    )
+    if history is None:
+        history = _build_history(config)
     if engine is None:
         from hybrid_inpaint.infrastructure.fs_models import FileSystemModelRepository
         from hybrid_inpaint.infrastructure.torch_engine import SerializedEngine

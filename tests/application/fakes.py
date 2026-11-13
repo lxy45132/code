@@ -1,10 +1,12 @@
-"""Fake adapters: application tests run without GPU/torch/PIL/sqlite."""
+"""Fake adapters: application tests run without GPU/torch/PIL/sqlite/redis."""
 
 from __future__ import annotations
 
 import csv
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -42,6 +44,11 @@ class FakeEngine:
         out = arr.copy()
         out[mask] = fill
         return out
+
+    def inpaint_many(
+        self, images: list[np.ndarray], masks: list[np.ndarray]
+    ) -> list[np.ndarray]:
+        return [self.inpaint(image, mask) for image, mask in zip(images, masks)]
 
 
 class InMemoryHistory:
@@ -144,3 +151,69 @@ class FlagToken:
     def cancelled(self) -> bool:
         self.checks += 1
         return self.checks > self.cancel_after
+
+
+class InMemoryEventBus:
+    """EventBus 端口的内存实现；语义与 Redis Stream 版一致（顺序 + MAXLEN 截断）。"""
+
+    def __init__(self, *, maxlen: int = 10_000) -> None:
+        self.maxlen = maxlen
+        self.events: dict[str, list[tuple[str, dict[str, Any]]]] = {}
+
+    def publish(self, stream: str, event_type: str, data: Mapping[str, Any]) -> None:
+        events = self.events.setdefault(stream, [])
+        events.append((event_type, dict(data)))
+        if len(events) > self.maxlen:
+            del events[: len(events) - self.maxlen]
+
+
+class InMemoryCache:
+    """Cache 端口的内存实现（不模拟过期；TTL 只记录）。"""
+
+    def __init__(self) -> None:
+        self.values: dict[str, str] = {}
+        self.ttls: dict[str, int] = {}
+        self.deleted: list[str] = []
+
+    def get(self, key: str) -> str | None:
+        return self.values.get(key)
+
+    def set(self, key: str, value: str, ttl_s: int) -> None:
+        self.values[key] = value
+        self.ttls[key] = ttl_s
+
+    def delete(self, key: str) -> None:
+        self.values.pop(key, None)
+        self.ttls.pop(key, None)
+        self.deleted.append(key)
+
+
+class InMemoryCancelToken:
+    """CancellationToken + CancelFlag 双端口的内存实现（应用层测试用）。"""
+
+    def __init__(self) -> None:
+        self._cancelled = False
+        self.set_calls = 0
+
+    def set(self) -> None:
+        self._cancelled = True
+        self.set_calls += 1
+
+    @property
+    def cancelled(self) -> bool:
+        return self._cancelled
+
+
+class InMemoryBatchCancellation:
+    """BatchCancellation 端口的内存实现：同 batch_id 共享同一 token。"""
+
+    def __init__(self) -> None:
+        self.tokens: dict[str, InMemoryCancelToken] = {}
+
+    def cancel(self, batch_id: str) -> None:
+        self.token(batch_id).set()
+
+    def token(self, batch_id: str) -> InMemoryCancelToken:
+        if batch_id not in self.tokens:
+            self.tokens[batch_id] = InMemoryCancelToken()
+        return self.tokens[batch_id]
