@@ -1,10 +1,10 @@
 # Hybrid Inpaint
 
-基于 U-Net 与瓶颈 Transformer（ViT）、GAN 两阶段训练的图像修复系统，配套 Qt 桌面端与 Gradio/FastAPI Web 端。
+基于 U-Net 与瓶颈 Transformer（ViT）、GAN 两阶段训练的图像修复系统，配套 Qt 桌面端与 FastAPI + Vue3 Web 端（MySQL/Redis/Celery 批量任务）。
 
 ## 当前状态
 
-施工中。C0–C6 已完成：算法管线（U-Net + ViT + GAN 两阶段）、T0 真实数据与冻结 manifest、固定评测 CLI、512/1024 分块推理、大洞压力表，以及 C6 系统核心（分层用例、Torch/Pillow/SQLite/文件系统适配器、组合根、`inpaint`/`run` CLI）均已就绪，248 个测试通过；dry-run checkpoint 端到端冒烟通过。训练每次验证自动存“原图|掩码|修复”对比图（`samples/`）并刷新损失/指标曲线（`plots/`）。正式 B0/B1/B2/Main 训练待 24 GB 云卡；C7（FastAPI + Gradio）/C8（Qt）未开始。
+施工中。C0–C6 已完成：算法管线（U-Net + ViT + GAN 两阶段）、T0 真实数据与冻结 manifest、固定评测 CLI、512/1024 分块推理、大洞压力表，以及 C6 系统核心（分层用例、适配器、组合根、`inpaint`/`run` CLI）。**C7 Web 端已完成 C7a–C7g**：FastAPI + Vue3 三页（单图/批量/历史）、SQLAlchemy + Alembic（MySQL/SQLite 双后端）、Celery + Redis 批量任务（SSE 进度/断线回放/取消/凑批）、Playwright e2e 四场景、docker-compose 编排与 `start`/`worker`/`db init` CLI；333 个后端测试 + 14 个前端 vitest + 4 个 e2e 通过。正式 B0/B1/B2/Main 训练待 24 GB 云卡；C8（Qt）未开始。
 
 项目根目录：`D:\Code\bs\code`（ASCII 路径，不需要 `PYTHONUTF8` 或 `--env-file`）。
 
@@ -15,6 +15,7 @@
 - [总体施工方案](docs/00_总体施工方案.md)
 - [模型与训练方案](docs/01_模型与训练方案.md)
 - [系统设计方案](docs/02_系统设计方案.md)
+- [Web 端设计方案（C7 施工契约）](docs/03_Web端设计方案.md)
 - [施工进度](docs/PROGRESS.md)
 - [C0 handoff](docs/handoffs/HANDOFF_C0.md)
 - [C1 handoff](docs/handoffs/HANDOFF_C1.md)
@@ -23,6 +24,7 @@
 - [C4 handoff](docs/handoffs/HANDOFF_C4.md)
 - [C5 handoff（进行中）](docs/handoffs/HANDOFF_C5.md)
 - [C6 handoff](docs/handoffs/HANDOFF_C6.md)
+- [C7 handoff](docs/handoffs/HANDOFF_C7.md)
 - [实验矩阵与运行手册](docs/EXPERIMENT_MATRIX.md)
 - [给下一个 Agent 的详细交接文档](docs/handoffs/HANDOFF_NEXT_AGENT.md)
 
@@ -45,8 +47,20 @@ uv sync --extra dev --extra train
 Web / 桌面依赖：
 
 ```bash
-uv sync --extra dev --extra web
+uv sync --extra dev --extra train --extra web   # Web 全栈（含 torch 推理）
 uv sync --extra dev --extra gui
+```
+
+前端（Node ≥ 20）：
+
+```bash
+cd frontend
+npm install
+npm run dev      # 开发 :5173，代理 /api → 127.0.0.1:8000
+npm run build    # 产出 dist，由 FastAPI 同源托管
+npm run test     # vitest
+npm run lint
+npm run test:e2e # Playwright（需 Redis + 后端，自动起测试服务）
 ```
 
 ## 常用命令
@@ -77,9 +91,19 @@ uv run --no-sync hybrid-inpaint plot --run-dir outputs/smoke/seed_2026
 # 阶段二（T0 正式数据就绪后）：从阶段一 best.pt 初始化
 # uv run --no-sync hybrid-inpaint train -c configs/experiments/main.yaml \
 #   --resume outputs/b1_unet_vit/seed_2026/checkpoints/best.pt
-uv run --no-sync hybrid-inpaint start --config configs/system.yaml   # C7 之后可用
+uv run --no-sync hybrid-inpaint start --config configs/system.yaml   # Web API（托管 frontend/dist）
+uv run --no-sync hybrid-inpaint worker --config configs/system.yaml  # Celery worker（批量/worker 模式）
+uv run --no-sync hybrid-inpaint db init --config configs/system.yaml # 建库 + Alembic 迁移
 uv run --no-sync hybrid-inpaint gui --config configs/system.yaml     # C8 之后可用
 ```
+
+## Web 端（C7）
+
+- 本地开发：Redis 先起（本机 `D:\Redis-8.6.2-Windows-x64-cygwin-with-Service\redis-server.exe --port 6379`）；`scripts\dev.ps1 api|worker|web|migrate|test|e2e` 一条命令化。
+- 默认 SQLite + inline 模式零额外依赖；MySQL 切换：`system.storage.backend: mysql` + `db init`（账号密码经 `HYBRID_INPAINT__SYSTEM__STORAGE__MYSQL__PASSWORD` 等环境变量注入，不入 YAML）。
+- 批量任务：Web 上传配对 → Celery chunk 凑批 → SSE 实时进度（Last-Event-ID 断线回放）→ 取消 → report.csv；Windows worker 固定 `--pool=solo -c 1`。
+- 容器化演示：`docker compose up --build -d`（mysql + redis + api×2 + worker；`--profile monitor` 加 Flower）；生产 GPU worker 建议宿主机直跑。
+- 详细设计与契约变更（AD-05/06/07/11/12）见 [docs/03_Web端设计方案](docs/03_Web端设计方案.md)。
 
 ## 目录
 
@@ -87,10 +111,13 @@ uv run --no-sync hybrid-inpaint gui --config configs/system.yaml     # C8 之后
 hybrid_inpaint/
   domain/          # 实体、端口、错误、纯函数
   application/     # 用例
-  infrastructure/  # torch / pillow / sqlite / 文件系统适配器
-  interfaces/      # CLI / FastAPI / Gradio / Qt
+  infrastructure/  # torch / pillow / sqlite / sqlalchemy / redis / 文件系统适配器
+  interfaces/      # CLI / FastAPI（+ Celery 任务）/ Qt
   models/          # nn.Module
   training/        # 数据、损失、指标、训练器
   bootstrap.py     # 组合根
-  config.py        # pydantic 配置
+  config.py        # pydantic 配置（YAML < 环境变量 < overrides）
+frontend/          # Vue3 + Vite + TS（单图/批量/历史三页）
+alembic/           # 数据库迁移
+scripts/           # dev.ps1 / e2e 服务
 ```
