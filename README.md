@@ -4,11 +4,13 @@
 
 ## 当前状态
 
-施工中。C0–C4 已完成；**C5 进行中**：T0 真实数据已落盘并冻结 manifest，真实数据适配器、Places/CelebA dry run、固定评测 CLI、512/1024 分块推理、40%–60% 大洞压力表和评测报告均已就绪；正式 B0/B1/B2/Main 训练待 24 GB 云卡。
+施工中。C0–C6 已完成：算法管线（U-Net + ViT + GAN 两阶段）、T0 真实数据与冻结 manifest、固定评测 CLI、512/1024 分块推理、大洞压力表，以及 C6 系统核心（分层用例、Torch/Pillow/SQLite/文件系统适配器、组合根、`inpaint`/`run` CLI）均已就绪，248 个测试通过；dry-run checkpoint 端到端冒烟通过。训练每次验证自动存“原图|掩码|修复”对比图（`samples/`）并刷新损失/指标曲线（`plots/`）。正式 B0/B1/B2/Main 训练待 24 GB 云卡；C7（FastAPI + Gradio）/C8（Qt）未开始。
 
 项目根目录：`D:\Code\bs\code`（ASCII 路径，不需要 `PYTHONUTF8` 或 `--env-file`）。
 
 ## 文档
+
+> docs 目录仅本地维护，不纳入 Git（以下链接在 GitHub 上不可见）。
 
 - [总体施工方案](docs/00_总体施工方案.md)
 - [模型与训练方案](docs/01_模型与训练方案.md)
@@ -20,6 +22,7 @@
 - [C3 handoff](docs/handoffs/HANDOFF_C3.md)
 - [C4 handoff](docs/handoffs/HANDOFF_C4.md)
 - [C5 handoff（进行中）](docs/handoffs/HANDOFF_C5.md)
+- [C6 handoff](docs/handoffs/HANDOFF_C6.md)
 - [实验矩阵与运行手册](docs/EXPERIMENT_MATRIX.md)
 - [给下一个 Agent 的详细交接文档](docs/handoffs/HANDOFF_NEXT_AGENT.md)
 
@@ -66,12 +69,16 @@ uv run --no-sync hybrid-inpaint evaluate -c configs/dryrun_places.yaml \
   --dataset places2 --pairs data/manifests/places365_stress_pairs.jsonl \
   --limit 5 --output-dir outputs/eval_stress
 uv run --no-sync hybrid-inpaint train --config configs/smoke.yaml --resume outputs/smoke/seed_2026/checkpoints/last.pt
+# 单图 / 批量修复（C6 已实现；冒烟用 dryrun 配置，正式权重换 configs/system.yaml 的 system.checkpoint）
+uv run --no-sync hybrid-inpaint inpaint --image <图> --mask <掩码> --output out.png --config configs/dryrun_places.yaml
+uv run --no-sync hybrid-inpaint run --input-dir <图目录> --mask-dir <掩码目录> --output-dir <输出目录> --config configs/dryrun_places.yaml
+# 训练曲线（损失/验证指标）：训练中自动刷新，也可事后补画
+uv run --no-sync hybrid-inpaint plot --run-dir outputs/smoke/seed_2026
 # 阶段二（T0 正式数据就绪后）：从阶段一 best.pt 初始化
 # uv run --no-sync hybrid-inpaint train -c configs/experiments/main.yaml \
 #   --resume outputs/b1_unet_vit/seed_2026/checkpoints/best.pt
 uv run --no-sync hybrid-inpaint start --config configs/system.yaml   # C7 之后可用
 uv run --no-sync hybrid-inpaint gui --config configs/system.yaml     # C8 之后可用
-uv run --no-sync hybrid-inpaint run --input-dir ... --mask-dir ...   # C6 之后可用
 ```
 
 ## 目录

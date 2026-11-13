@@ -490,3 +490,29 @@ def inpaint(
         f"model_version={result.model_version} mask_ratio={result.mask_ratio:.4f}"
     )
     typer.echo(f"output={output}")
+
+
+@app.command("plot")
+def plot(
+    run_dir: Path = typer.Option(..., "--run-dir", exists=True, file_okay=False),
+    output_dir: Path | None = typer.Option(None, "--output-dir", file_okay=False),
+) -> None:
+    """Render loss/metric curves from a run's train.jsonl / val.jsonl."""
+    from hybrid_inpaint.training.engine.plots import plot_run
+
+    try:
+        paths = plot_run(run_dir, output_dir)
+    except ImportError as exc:
+        typer.echo(
+            f"[plot error] matplotlib missing ({exc}); run: uv sync --extra dev --extra train",
+            err=True,
+        )
+        raise typer.Exit(code=2) from exc
+    except (ValueError, OSError) as exc:
+        typer.echo(f"[plot error] {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+    if not paths:
+        typer.echo("no train/val logs yet; nothing to plot")
+        return
+    for path in paths:
+        typer.echo(f"plot={path}")

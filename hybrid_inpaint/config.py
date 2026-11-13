@@ -176,6 +176,7 @@ class TrainConfig(StrictModel):
     val_batch_size: int = 8
     patience: int = 10
     log_every: int = 10
+    val_visual_samples: int = 4
     seed: int = 2026
     device: Literal["cuda", "cpu", "mps"] = "cuda"
     output_dir: Path = Path("outputs")
@@ -201,6 +202,13 @@ class TrainConfig(StrictModel):
     def _non_negative_seed(cls, value: int) -> int:
         if value < 0:
             raise ValueError("seed must be >= 0")
+        return value
+
+    @field_validator("val_visual_samples")
+    @classmethod
+    def _non_negative_visual_samples(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("val_visual_samples must be >= 0")
         return value
 
     @field_validator("lr", "min_lr", "grad_clip")

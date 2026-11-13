@@ -648,6 +648,23 @@ class Trainer:
                 self.history.append(validation)
                 self._append_jsonl("val.jsonl", validation)
 
+                if self.config.train.val_visual_samples > 0:
+                    from hybrid_inpaint.training.engine.visualize import save_val_samples
+
+                    save_val_samples(
+                        self.model,
+                        self.val_dataset,
+                        device=self.device,
+                        count=self.config.train.val_visual_samples,
+                        out_path=self.run_dir / "samples" / f"val_{final_iteration:06d}.png",
+                    )
+                try:
+                    from hybrid_inpaint.training.engine.plots import plot_run
+
+                    plot_run(self.run_dir)
+                except ImportError:
+                    pass  # matplotlib 可选；曲线可事后用 plot 命令补画
+
                 message = (
                     f"[val] iter {final_iteration}/{total} "
                     f"psnr_hole={validation['psnr_hole']:.3f} "
