@@ -31,4 +31,9 @@ Thumbs.db
 # Build outputs
 dist/
 build/
-*.rar 
+*.rar
+
+# Frontend
+node_modules/
+frontend/test-results/
+frontend/playwright-report/

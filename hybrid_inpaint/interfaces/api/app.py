@@ -11,8 +11,9 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import redis.asyncio as aioredis
-from fastapi import APIRouter, Depends, FastAPI
+from fastapi import APIRouter, Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from hybrid_inpaint.bootstrap import Container
@@ -70,5 +71,18 @@ def create_app(container: Container) -> FastAPI:
 
     dist = _PROJECT_ROOT / "frontend" / "dist"
     if dist.is_dir():
-        app.mount("/", StaticFiles(directory=dist, html=True), name="frontend")
+        # IOPaint 模式：同源托管 dist；Vue Router history 模式需 SPA fallback。
+        app.mount(
+            "/assets", StaticFiles(directory=dist / "assets"), name="assets"
+        )
+
+        @app.get("/{full_path:path}", include_in_schema=False)
+        async def spa_fallback(full_path: str) -> FileResponse:
+            if full_path.startswith("api/"):
+                raise HTTPException(status_code=404, detail="not found")
+            candidate = (dist / full_path).resolve()
+            if full_path and candidate.is_file() and candidate.is_relative_to(dist):
+                return FileResponse(candidate)
+            return FileResponse(dist / "index.html")
+
     return app

@@ -284,3 +284,26 @@ def test_concurrent_inpaint_all_complete(client: TestClient) -> None:
     assert len(job_ids) == 4
     page = client.get("/api/v1/history", params={"limit": 10}).json()
     assert len(page["items"]) == 4
+
+
+_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
+
+
+@pytest.mark.skipif(not _DIST.is_dir(), reason="frontend/dist not built")
+def test_spa_hosting_and_fallback(client: TestClient) -> None:
+    root = client.get("/")
+    assert root.status_code == 200
+    assert 'id="app"' in root.text
+
+    route = client.get("/inpaint")  # Vue Router history 模式 fallback
+    assert route.status_code == 200
+    assert 'id="app"' in route.text
+
+    unknown_api = client.get("/api/v1/nonexistent")
+    assert unknown_api.status_code == 404
+    assert unknown_api.json()["code"] == "not_found"
+
+    assets = list((_DIST / "assets").glob("*.js"))
+    assert assets, "dist/assets 应有构建产物"
+    asset = client.get(f"/assets/{assets[0].name}")
+    assert asset.status_code == 200
