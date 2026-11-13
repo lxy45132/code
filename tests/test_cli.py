@@ -31,12 +31,12 @@ def test_config_validate_rejects_bad_config(tmp_path: Path) -> None:
     assert "config error" in result.output.lower()
 
 
-def test_start_is_registered_but_not_implemented(tmp_path: Path) -> None:
-    path = _write_config(tmp_path)
-    result = runner.invoke(app, ["start", "--config", str(path)])
-
-    assert result.exit_code == 3
-    assert "not implemented" in result.output.lower()
+def test_start_and_worker_are_registered(tmp_path: Path) -> None:
+    # C7g 已实现 start/worker；功能测试见 tests/test_cli_web.py
+    for command in ("start", "worker"):
+        result = runner.invoke(app, [command, "--help"])
+        assert result.exit_code == 0
+        assert "--config" in result.output
 
 
 def _write_train_config(

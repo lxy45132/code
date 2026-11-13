@@ -22,7 +22,7 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 import torch
 
-from hybrid_inpaint.config import AppConfig
+from hybrid_inpaint.config import AppConfig, validate_checkpoint_config
 from hybrid_inpaint.models.generator import build_generator
 from hybrid_inpaint.models.unet import compose_output
 from hybrid_inpaint.training.data.manifest_dataset import FixedPairDataset
@@ -189,7 +189,7 @@ def evaluate_checkpoint(
         map_location="cpu",
         restore_rng=False,
     )
-    stored_config = AppConfig.model_validate(payload["config"])
+    stored_config = validate_checkpoint_config(payload["config"])
     model = build_generator(stored_config.model)
     model.load_state_dict(payload["model"], strict=True)
 

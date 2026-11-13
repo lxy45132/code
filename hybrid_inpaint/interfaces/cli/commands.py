@@ -1,11 +1,12 @@
 """CLI commands.
 
-config/data/train/evaluate/inpaint/run 已实现；start/gui 等待 C7/C8，
-在对应施工步骤落地前以退出码 3 提示。
+config/data/train/evaluate/inpaint/run/start/worker/db 已实现；
+gui 等待 C8，在对应施工步骤落地前以退出码 3 提示。
 """
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -448,10 +449,69 @@ def evaluate(
 @app.command("start")
 def start(
     config: Path = typer.Option(..., "--config", "-c", exists=True, dir_okay=False),
+    host: str = typer.Option(None, "--host", help="覆盖 system.web.host"),
+    port: int = typer.Option(None, "--port", help="覆盖 system.web.port"),
+    workers: int = typer.Option(None, "--workers", help="覆盖 system.web.workers"),
 ) -> None:
-    """Start the FastAPI + Gradio web application."""
+    """Start the FastAPI web application (uvicorn).
+
+    inline 模式在本进程加载模型（单 worker）；worker 模式 api 无状态，
+    可多 worker（需 mysql backend，配置校验强制）。
+    """
+    import uvicorn
+
+    parsed = _load_or_exit(config)
+    os.environ["HYBRID_INPAINT_CONFIG"] = str(config)
+    web = parsed.system.web
+    resolved_workers = workers if workers is not None else web.workers
+    resolved_host = host or web.host
+    resolved_port = port if port is not None else web.port
+
+    from hybrid_inpaint.bootstrap import build_container
+    from hybrid_inpaint.interfaces.api.app import create_app
+
+    container = build_container(config)
+    application = create_app(container)
+    typer.echo(
+        f"api listening on http://{resolved_host}:{resolved_port} "
+        f"(mode={parsed.system.inference.mode}, workers={resolved_workers}, "
+        f"backend={parsed.system.storage.backend})"
+    )
+    if resolved_workers > 1:
+        # 多进程需 import string 入口（每进程独立装配）
+        uvicorn.run(
+            "hybrid_inpaint.interfaces.api.wsgi:app",
+            host=resolved_host,
+            port=resolved_port,
+            workers=resolved_workers,
+        )
+    else:
+        uvicorn.run(application, host=resolved_host, port=resolved_port)
+
+
+@app.command("worker")
+def worker(
+    config: Path = typer.Option(..., "--config", "-c", exists=True, dir_okay=False),
+    queues: str = typer.Option("gpu", "--queues", "-Q", help="消费队列"),
+    concurrency: int = typer.Option(1, "--concurrency", help="并发数（单 GPU 固定 1）"),
+    pool: str = typer.Option("solo", "--pool", help="Windows 必须 solo"),
+    loglevel: str = typer.Option("INFO", "--loglevel"),
+) -> None:
+    """Start the Celery worker (Windows: --pool=solo, 单 GPU 串行)."""
+    os.environ["HYBRID_INPAINT_CONFIG"] = str(config)
     _load_or_exit(config)
-    _not_implemented("start", "C7")
+    from hybrid_inpaint.interfaces.api.celery_app import celery_app
+
+    typer.echo(f"celery worker starting (pool={pool}, queues={queues})")
+    celery_app.worker_main(
+        argv=[
+            "worker",
+            f"--pool={pool}",
+            f"--queues={queues}",
+            f"--concurrency={concurrency}",
+            f"--loglevel={loglevel}",
+        ]
+    )
 
 
 @app.command("gui")

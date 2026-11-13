@@ -14,7 +14,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from hybrid_inpaint.config import AppConfig
+from hybrid_inpaint.config import validate_checkpoint_config
 from hybrid_inpaint.domain.errors import (
     BusyError,
     ModelUnavailableError,
@@ -49,7 +49,7 @@ class TorchInpaintEngine:
             payload = load_checkpoint(
                 source, expected_config=None, map_location="cpu", restore_rng=False
             )
-            stored = AppConfig.model_validate(payload["config"])
+            stored = validate_checkpoint_config(payload["config"])
             model = build_generator(stored.model)
             model.load_state_dict(payload["model"], strict=True)
         except (CheckpointError, KeyError, ValueError, RuntimeError) as exc:

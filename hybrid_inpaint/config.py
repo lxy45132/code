@@ -7,7 +7,10 @@ same config works from any working directory.
 
 from __future__ import annotations
 
+import copy
+import json
 import math
+import os
 import re
 from pathlib import Path
 from typing import Any, Literal
@@ -596,12 +599,56 @@ def _format_validation_error(error: ValidationError) -> str:
     return "; ".join(lines)
 
 
+def validate_checkpoint_config(raw: dict[str, Any]) -> AppConfig:
+    """校验 checkpoint 内嵌配置，容忍已废弃键（向后兼容）。
+
+    旧 checkpoint（≤C6）内嵌 system.web.mount_gradio，C7 已移除该键；
+    剥离废弃键后再校验，保证旧权重仍可加载/评测。
+    """
+    cleaned = copy.deepcopy(raw)
+    system = cleaned.get("system")
+    if isinstance(system, dict):
+        web = system.get("web")
+        if isinstance(web, dict):
+            web.pop("mount_gradio", None)
+    return AppConfig.model_validate(cleaned)
+
+
+def _env_overrides() -> dict[str, Any]:
+    """HYBRID_INPAINT__SECTION__KEY 环境变量 → 嵌套覆盖（03 文档 §9）。
+
+    密码/API Key 等敏感项只走环境变量，不入 YAML 不入 Git。
+    值优先按 JSON 解析（数字/布尔/null），失败则保留字符串。
+    """
+    prefix = "HYBRID_INPAINT__"
+    result: dict[str, Any] = {}
+    for key, value in os.environ.items():
+        if not key.startswith(prefix):
+            continue
+        parts = key[len(prefix) :].lower().split("__")
+        try:
+            parsed = json.loads(value)
+        except ValueError:
+            parsed = value
+        node = result
+        for part in parts[:-1]:
+            child = node.setdefault(part, {})
+            if not isinstance(child, dict):
+                break
+            node = child
+        else:
+            node[parts[-1]] = parsed
+    return result
+
+
 def load_config(path: str | Path, overrides: dict[str, Any] | None = None) -> AppConfig:
     """Load, validate and path-resolve a YAML config.
 
     Relative paths in the config are resolved against the YAML file's parent
     directory.  Unknown keys, wrong types, non-finite numbers and invalid
     ranges are rejected with :class:`ConfigError`.
+
+    优先级：YAML < HYBRID_INPAINT__ 环境变量 < 显式 overrides。
     """
     config_path = Path(path)
     if not config_path.is_file():
@@ -617,6 +664,7 @@ def load_config(path: str | Path, overrides: dict[str, Any] | None = None) -> Ap
     if not isinstance(raw, dict):
         raise ConfigError("config root must be a mapping")
 
+    raw = _deep_merge(raw, _env_overrides())
     if overrides:
         raw = _deep_merge(raw, overrides)
 
