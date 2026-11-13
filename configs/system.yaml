@@ -3,7 +3,9 @@ experiment_id: system
 
 system:
   model_id: main
-  checkpoint: ../outputs/main/seed_2026/checkpoints/best_psnr.pt
+  # 当前为 dry-run 权重（仅工程冒烟，非论文结果）；正式训练后换回
+  # ../outputs/main/seed_2026/checkpoints/best_psnr.pt
+  checkpoint: ../outputs/dryrun_places/seed_2026/checkpoints/best.pt
   device: cuda
   pad_multiple: 16
   tiling:
