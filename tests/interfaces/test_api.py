@@ -18,7 +18,12 @@ from PIL import Image as PILImage
 from hybrid_inpaint.bootstrap import build_container
 from hybrid_inpaint.domain.errors import BusyError
 from hybrid_inpaint.interfaces.api.app import create_app
-from tests.application.fakes import FakeEngine
+from tests.application.fakes import (
+    FakeEngine,
+    InMemoryBatchCancellation,
+    InMemoryCache,
+    InMemoryEventBus,
+)
 
 
 def _config(tmp_path: Path, extra: str = "") -> Path:
@@ -65,7 +70,13 @@ def _files(size: int = 8, hole: bool = True) -> dict:
 
 @pytest.fixture()
 def container(tmp_path: Path):
-    return build_container(_config(tmp_path), engine=FakeEngine())
+    return build_container(
+        _config(tmp_path),
+        engine=FakeEngine(),
+        events=InMemoryEventBus(),
+        cache=InMemoryCache(),
+        cancellation=InMemoryBatchCancellation(),
+    )
 
 
 @pytest.fixture()
@@ -236,19 +247,11 @@ def test_unhandled_error_maps_to_500(container, monkeypatch) -> None:
     }
 
 
-def test_worker_mode_not_available_yet(tmp_path: Path) -> None:
-    container = build_container(
-        _config(tmp_path, "  inference:\n    mode: worker"), engine=FakeEngine()
-    )
-    client = TestClient(create_app(container))
-    response = _post_inpaint(client)
-    assert response.status_code == 503
-    assert response.json()["code"] == "model_unavailable"
-
-
 def test_api_key_enforcement(tmp_path: Path) -> None:
     container = build_container(
-        _config(tmp_path, "  api:\n    api_key: secret"), engine=FakeEngine()
+        _config(tmp_path, "  api:\n    api_key: secret"),
+        engine=FakeEngine(),
+        cache=InMemoryCache(),
     )
     client = TestClient(create_app(container))
     assert client.get("/api/v1/models").status_code == 401

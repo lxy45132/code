@@ -18,6 +18,10 @@ from hybrid_inpaint.config import AppConfig, load_config
 from hybrid_inpaint.domain.entities import Limits, ModelSpec
 from hybrid_inpaint.domain.ports import (
     ArtifactStore,
+    BatchCancellation,
+    BatchStateRepository,
+    Cache,
+    EventBus,
     HistoryRepository,
     ImageCodec,
     InpaintEngine,
@@ -35,21 +39,31 @@ class Container:
     config: AppConfig
     limits: Limits
     codec: ImageCodec
-    engine: InpaintEngine
+    engine: InpaintEngine | None  # worker 模式的 api 进程不加载模型
     artifacts: ArtifactStore
     history: HistoryRepository
-    inpaint: InpaintImage
-    batch: BatchInpaint
+    inpaint: InpaintImage | None
+    batch: BatchInpaint | None
     history_service: HistoryService
     model_service: ModelService
+    batch_state: BatchStateRepository
+    events: EventBus
+    cache: Cache
+    cancellation: BatchCancellation
 
 
-def _build_history(config: AppConfig) -> HistoryRepository:
-    """Select the history adapter by system.storage.backend (03 文档 §6).
+def _build_storage(
+    config: AppConfig, history: HistoryRepository | None
+) -> tuple[HistoryRepository, BatchStateRepository]:
+    """按 storage.backend 装配历史 + 批量状态仓储（03 文档 §6）。
 
-    mysql 后端返回 SQLAlchemy 适配器（建表依赖 alembic upgrade head，
-    由 ``db init`` / 部署脚本负责）；sqlite 后端保持原零依赖行为。
+    mysql：共用一个 SQLAlchemy 引擎（建表依赖 alembic upgrade head）；
+    sqlite：历史用原零依赖适配器，批量表用 SQLAlchemy 同库文件。
     """
+    from hybrid_inpaint.infrastructure.sqlalchemy_batch import SqlAlchemyBatchRepository
+    from hybrid_inpaint.infrastructure.sqlalchemy_history import ensure_schema
+
+    paths_base = config.system.output_dir.parent
     if config.system.storage.backend == "mysql":
         from hybrid_inpaint.infrastructure.sqlalchemy_history import (
             SqlAlchemyHistoryRepository,
@@ -60,12 +74,17 @@ def _build_history(config: AppConfig) -> HistoryRepository:
         engine = build_mysql_engine(
             mysql.host, mysql.port, mysql.user, mysql.password, mysql.database
         )
-        return SqlAlchemyHistoryRepository(
-            engine, paths_base=config.system.output_dir.parent
+        resolved = history or SqlAlchemyHistoryRepository(engine, paths_base=paths_base)
+    else:
+        from sqlalchemy import create_engine
+
+        resolved = history or SqliteHistoryRepository(
+            config.system.history_db, paths_base=paths_base
         )
-    return SqliteHistoryRepository(
-        config.system.history_db, paths_base=config.system.output_dir.parent
-    )
+        engine = create_engine(f"sqlite:///{config.system.history_db.as_posix()}")
+        ensure_schema(engine)
+    batch_state = SqlAlchemyBatchRepository(engine, paths_base=paths_base)
+    return resolved, batch_state
 
 
 def build_container(
@@ -75,6 +94,9 @@ def build_container(
     engine: InpaintEngine | None = None,
     codec: ImageCodec | None = None,
     history: HistoryRepository | None = None,
+    events: EventBus | None = None,
+    cache: Cache | None = None,
+    cancellation: BatchCancellation | None = None,
 ) -> Container:
     config = load_config(config_path, overrides)
     setup_logging(config.system.history_db.parent / "system.log")
@@ -87,9 +109,24 @@ def build_container(
     clock = SystemClock()
     ids = UuidGenerator()
     artifacts = FileSystemArtifactStore(config.system.output_dir, resolved_codec)
-    if history is None:
-        history = _build_history(config)
-    if engine is None:
+    resolved_history, batch_state = _build_storage(config, history)
+
+    from hybrid_inpaint.infrastructure.celery_cancel import RedisBatchCancellation
+    from hybrid_inpaint.infrastructure.redis_events import (
+        RedisCache,
+        RedisEventBus,
+        build_redis_client,
+    )
+
+    redis_client = build_redis_client(config.system.redis.url)  # 懒连接
+    resolved_events = events or RedisEventBus(redis_client)
+    resolved_cache = cache or RedisCache(redis_client)
+    resolved_cancellation = cancellation or RedisBatchCancellation(redis_client)
+
+    if engine is None and config.system.inference.mode == "worker":
+        # worker 模式：模型只在 Celery worker 进程加载，api 无状态（03 文档 §4）
+        model_service = ModelService(None, engine=None, model_id=config.system.model_id)
+    elif engine is None:
         from hybrid_inpaint.infrastructure.fs_models import FileSystemModelRepository
         from hybrid_inpaint.infrastructure.torch_engine import SerializedEngine
 
@@ -112,18 +149,30 @@ def build_container(
         model_service = ModelService(
             None, engine=engine, model_id=config.system.model_id
         )
-    inpaint = InpaintImage(engine, artifacts, history, clock, ids, limits)
-    batch = BatchInpaint(inpaint, resolved_codec, FileSystemBatchFiles(), ids, limits)
-    history_service = HistoryService(history, artifacts)
+    inpaint = (
+        InpaintImage(engine, artifacts, resolved_history, clock, ids, limits)
+        if engine is not None
+        else None
+    )
+    batch = (
+        BatchInpaint(inpaint, resolved_codec, FileSystemBatchFiles(), ids, limits)
+        if inpaint is not None
+        else None
+    )
+    history_service = HistoryService(resolved_history, artifacts)
     return Container(
         config=config,
         limits=limits,
         codec=resolved_codec,
         engine=engine,
         artifacts=artifacts,
-        history=history,
+        history=resolved_history,
         inpaint=inpaint,
         batch=batch,
         history_service=history_service,
         model_service=model_service,
+        batch_state=batch_state,
+        events=resolved_events,
+        cache=resolved_cache,
+        cancellation=resolved_cancellation,
     )

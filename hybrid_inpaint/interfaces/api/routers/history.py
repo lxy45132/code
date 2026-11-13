@@ -15,6 +15,11 @@ from starlette.background import BackgroundTask
 
 from hybrid_inpaint.bootstrap import Container
 from hybrid_inpaint.domain.services import validate_job_id
+from hybrid_inpaint.interfaces.api.caching import (
+    bump_history_cache,
+    get_history_page,
+    set_history_page,
+)
 from hybrid_inpaint.interfaces.api.dependencies import get_container
 from hybrid_inpaint.interfaces.api.schemas.history import HistoryItem, HistoryPage
 
@@ -27,12 +32,17 @@ def list_history(
     offset: int = Query(0, ge=0),
     container: Container = Depends(get_container),
 ) -> HistoryPage:
+    cached = get_history_page(container, limit, offset)
+    if cached is not None:
+        return cached
     records = container.history_service.list(limit, offset)
-    return HistoryPage(
+    page = HistoryPage(
         items=[HistoryItem.from_record(record) for record in records],
         limit=limit,
         offset=offset,
     )
+    set_history_page(container, page)
+    return page
 
 
 @router.get("/history/export")
@@ -64,4 +74,5 @@ def delete_history(
 ) -> Response:
     validate_job_id(job_id)
     container.history_service.delete(job_id, delete_files=delete_files)
+    bump_history_cache(container)
     return Response(status_code=204)

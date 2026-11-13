@@ -511,6 +511,20 @@ class SystemConfig(StrictModel):
             raise ValueError("busy_timeout_s must be >= -1")
         return value
 
+    @model_validator(mode="after")
+    def _worker_mode_multi_process_needs_mysql(self) -> "SystemConfig":
+        # 多 uvicorn worker 共享 SQLite 不可用（03 文档 §13）；
+        # 单进程 api + sqlite 仍允许（本地开发/测试）。
+        if (
+            self.inference.mode == "worker"
+            and self.web.workers > 1
+            and self.storage.backend != "mysql"
+        ):
+            raise ValueError(
+                "inference.mode=worker with web.workers>1 requires storage.backend=mysql"
+            )
+        return self
+
 
 class AppConfig(StrictModel):
     contract_version: int = CONTRACT_VERSION

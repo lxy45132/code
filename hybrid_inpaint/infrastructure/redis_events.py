@@ -23,8 +23,16 @@ _KEY_PATTERN = re.compile(r"^[\x21-\x7e]+$")
 
 
 def build_redis_client(url: str) -> redis.Redis:
-    """业务库连接（decode_responses=True：事件/缓存均为字符串语义）。"""
-    return redis.Redis.from_url(url, decode_responses=True)
+    """业务库连接（decode_responses=True：事件/缓存均为字符串语义）。
+
+    短超时：Redis 不可达时快速失败，不拖慢主流程（03 文档 §13）。
+    """
+    return redis.Redis.from_url(
+        url,
+        decode_responses=True,
+        socket_connect_timeout=1.0,
+        socket_timeout=1.0,
+    )
 
 
 def _validate_key(name: str, what: str) -> None:

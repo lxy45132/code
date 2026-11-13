@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Sequence
 
 import numpy as np
 
@@ -49,6 +50,44 @@ class InpaintImage:
         self._limits = limits
 
     def execute(self, request: InpaintRequest) -> InpaintResult:
+        self._validate(request)
+        started = time.perf_counter()
+        if request.mask.ratio == 0.0:
+            generated = request.image.data.astype(np.float32) / 255.0
+            warnings: tuple[str, ...] = ()
+        else:
+            generated = self._engine.inpaint(request.image.data, request.mask.data)
+            warnings = tuple(self._engine.last_warnings)
+        return self._persist(request, generated, warnings, started)
+
+    def execute_many(self, requests: Sequence[InpaintRequest]) -> list[InpaintResult]:
+        """批量用例：同尺寸项经 engine.inpaint_many 凑批（03 文档 §4）。
+
+        逐项管线不变量（合成后置校验/历史/artifacts）与 execute 一致；
+        零洞项走恒等分支不进引擎。latency 含凑批等待，口径为整批耗时。
+        """
+        for request in requests:
+            self._validate(request)
+        started = time.perf_counter()
+        results: list[InpaintResult | None] = [None] * len(requests)
+        active: list[int] = []
+        for index, request in enumerate(requests):
+            if request.mask.ratio == 0.0:
+                generated = request.image.data.astype(np.float32) / 255.0
+                results[index] = self._persist(request, generated, (), started)
+            else:
+                active.append(index)
+        if active:
+            generated_list = self._engine.inpaint_many(
+                [requests[i].image.data for i in active],
+                [requests[i].mask.data for i in active],
+            )
+            warnings = tuple(self._engine.last_warnings)
+            for index, generated in zip(active, generated_list):
+                results[index] = self._persist(requests[index], generated, warnings, started)
+        return [result for result in results if result is not None]
+
+    def _validate(self, request: InpaintRequest) -> None:
         image, mask = request.image, request.mask
         if image.data.shape[:2] != mask.data.shape:
             raise ValidationError("image and mask sizes differ")
@@ -61,13 +100,14 @@ class InpaintImage:
         except ValueError as exc:
             raise ValidationError(str(exc)) from exc
 
-        started = time.perf_counter()
-        warnings: tuple[str, ...] = ()
-        if mask.ratio == 0.0:
-            generated = image.data.astype(np.float32) / 255.0
-        else:
-            generated = self._engine.inpaint(image.data, mask.data)
-            warnings = tuple(self._engine.last_warnings)
+    def _persist(
+        self,
+        request: InpaintRequest,
+        generated: np.ndarray,
+        warnings: tuple[str, ...],
+        started: float,
+    ) -> InpaintResult:
+        image, mask = request.image, request.mask
         output = Image(composite(image.data, mask.data, generated))
         latency_ms = (time.perf_counter() - started) * 1000.0
 
