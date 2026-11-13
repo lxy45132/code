@@ -81,7 +81,10 @@ def _build_storage(
         resolved = history or SqliteHistoryRepository(
             config.system.history_db, paths_base=paths_base
         )
-        engine = create_engine(f"sqlite:///{config.system.history_db.as_posix()}")
+        engine = create_engine(
+            f"sqlite:///{config.system.history_db.as_posix()}",
+            connect_args={"timeout": 30},  # api/worker 跨进程共库的锁等待
+        )
         ensure_schema(engine)
     batch_state = SqlAlchemyBatchRepository(engine, paths_base=paths_base)
     return resolved, batch_state

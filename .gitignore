@@ -37,3 +37,4 @@ build/
 node_modules/
 frontend/test-results/
 frontend/playwright-report/
+frontend/e2e/.worker.pid

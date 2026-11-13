@@ -307,3 +307,5 @@ def test_spa_hosting_and_fallback(client: TestClient) -> None:
     assert assets, "dist/assets 应有构建产物"
     asset = client.get(f"/assets/{assets[0].name}")
     assert asset.status_code == 200
+    # Windows 注册表可能把 .js 映射为 text/plain，必须显式纠正
+    assert asset.headers["content-type"].startswith("text/javascript")

@@ -7,6 +7,7 @@ lifespan 管理异步 Redis 连接（SSE 用，每连接独立协程不占线程
 
 from __future__ import annotations
 
+import mimetypes
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -32,6 +33,11 @@ from hybrid_inpaint.interfaces.api.routers import (
 )
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
+
+# Windows 注册表可能把 .js 映射为 text/plain，导致浏览器拒绝执行模块脚本。
+mimetypes.add_type("text/javascript", ".js")
+mimetypes.add_type("text/css", ".css")
+mimetypes.add_type("image/svg+xml", ".svg")
 
 
 def create_app(container: Container) -> FastAPI:
