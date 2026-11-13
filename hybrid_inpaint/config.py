@@ -614,15 +614,30 @@ def validate_checkpoint_config(raw: dict[str, Any]) -> AppConfig:
     return AppConfig.model_validate(cleaned)
 
 
-def _env_overrides() -> dict[str, Any]:
+def _env_overrides(dotenv_path: Path | None = None) -> dict[str, Any]:
     """HYBRID_INPAINT__SECTION__KEY 环境变量 → 嵌套覆盖（03 文档 §9）。
 
-    密码/API Key 等敏感项只走环境变量，不入 YAML 不入 Git。
-    值优先按 JSON 解析（数字/布尔/null），失败则保留字符串。
+    密码/API Key 等敏感项只走环境变量/.env，不入 YAML 不入 Git。
+    来源优先级：项目根 .env < 真实环境变量；值优先按 JSON 解析
+    （数字/布尔/null），失败则保留字符串。
     """
     prefix = "HYBRID_INPAINT__"
+    values: dict[str, str] = {}
+    path = (
+        dotenv_path
+        if dotenv_path is not None
+        else Path(__file__).resolve().parents[1] / ".env"
+    )
+    if path.is_file():
+        try:
+            from dotenv import dotenv_values
+
+            values.update({k: v for k, v in dotenv_values(path).items() if v is not None})
+        except ImportError:
+            pass
+    values.update(os.environ)
     result: dict[str, Any] = {}
-    for key, value in os.environ.items():
+    for key, value in values.items():
         if not key.startswith(prefix):
             continue
         parts = key[len(prefix) :].lower().split("__")

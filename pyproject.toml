@@ -36,6 +36,7 @@ web = [
   "pymysql>=1.1,<2",
   "celery>=5.4,<6",
   "redis>=6.1,<7",  # celery 5.6 的 kombu 要求 redis-py>=6.1
+  "python-dotenv>=1.0,<2",  # .env 敏感项注入（不入 YAML/Git）
 ]
 gui = [
   "PySide6>=6.7,<7",

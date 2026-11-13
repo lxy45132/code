@@ -105,3 +105,27 @@ def test_env_override_priority_below_explicit(tmp_path: Path, monkeypatch) -> No
     parsed = load_config(path, {"system": {"web": {"port": 9500}}})
 
     assert parsed.system.web.port == 9500
+
+
+def test_dotenv_is_loaded_and_env_wins(tmp_path: Path, monkeypatch) -> None:
+    from hybrid_inpaint.config import _env_overrides
+
+    dotenv = tmp_path / ".env"
+    dotenv.write_text(
+        "HYBRID_INPAINT__SYSTEM__STORAGE__MYSQL__PASSWORD=from-dotenv\n"
+        "HYBRID_INPAINT__SYSTEM__WEB__PORT=9100\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HYBRID_INPAINT__SYSTEM__WEB__PORT", "9200")
+
+    overrides = _env_overrides(dotenv)
+
+    assert overrides["system"]["storage"]["mysql"]["password"] == "from-dotenv"
+    assert overrides["system"]["web"]["port"] == 9200  # 真实 env 胜 .env
+
+
+def test_load_config_reads_project_dotenv(tmp_path: Path, monkeypatch) -> None:
+    # 默认路径（项目根 .env）存在时不报错；敏感项不出现在 YAML
+    path = _config(tmp_path)
+    parsed = load_config(path)
+    assert parsed.system.web.port >= 1

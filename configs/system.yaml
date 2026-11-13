@@ -19,14 +19,18 @@ system:
     host: 127.0.0.1
     port: 8000
     workers: 1
-  busy_timeout_s: 2.0
-  # C7 Web 栈（03 文档）：默认 sqlite 保持零依赖；切 MySQL 时改 backend
-  # 并配置 mysql 节（密码走环境变量，不入库不入 Git）。
+  busy_timeout_s: -1  # -1 = FIFO 无限排队不拒绝（03 文档 §4）
+  # C7 Web 栈（03 文档）：MySQL 权威状态；密码经 .env/环境变量注入，不入 Git。
   inference:
     mode: inline
     chunk_size: 8
   storage:
-    backend: sqlite
+    backend: mysql
+    mysql:
+      host: 127.0.0.1
+      port: 3306
+      user: root
+      database: hybrid_inpaint
   redis:
     url: redis://127.0.0.1:6379/0
   celery:
