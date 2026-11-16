@@ -15,8 +15,10 @@ Numerical policy:
 Batch composition is deterministic per iteration: iteration ``k`` draws its
 indices from ``SeedSequence([seed, 0xB2, k])``.  A resumed run sees exactly the
 same batches as an uninterrupted one without serialising a DataLoader iterator.
-This is sufficient for the C1 synthetic dataset; real image datasets will
-introduce worker-based loaders at T0.
+Sample content is likewise a pure function of ``(seed, index)``, so with
+``data.num_workers > 0`` each batch is fetched through a thread pool (one task
+per sample) and the following batch is prefetched while the GPU trains; the
+samples are identical to the serial path, only the wall-clock time changes.
 """
 
 from __future__ import annotations
@@ -25,6 +27,7 @@ import json
 import math
 import random
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
@@ -151,6 +154,17 @@ class Trainer:
         self.val_dataset = val_dataset
         self.device = _resolve_device(device or config.train.device)
         self.data_identity = dict(data_identity or {})
+
+        # Threaded sample loading + one-batch prefetch (num_workers=0 keeps
+        # the historical serial path).  Datasets are pure per-index functions,
+        # so parallel fetches cannot alter the training trajectory.
+        self._pending: dict[int, list[Future]] = {}
+        self._executor: ThreadPoolExecutor | None = None
+        if config.data.num_workers > 0:
+            self._executor = ThreadPoolExecutor(
+                max_workers=config.data.num_workers,
+                thread_name_prefix="inpaint-data",
+            )
 
         if run_dir is None:
             run_dir = (
@@ -330,6 +344,39 @@ class Trainer:
         )
         return [int(index) for index in indices]
 
+    def _fetch_samples(self, iteration: int) -> list[Sample]:
+        """Fetch one deterministic batch, optionally threaded + prefetched.
+
+        Each sample becomes its own pool task (Pillow decoding and numpy
+        augmentation release the GIL), and the next batch is submitted before
+        the current one is consumed so loading overlaps the GPU step.  Order
+        and content match the serial path exactly.
+        """
+        indices = self._batch_indices(iteration)
+        if self._executor is None:
+            return [self.train_dataset[index] for index in indices]
+
+        futures = self._pending.pop(iteration, None)
+        if futures is None:
+            futures = [
+                self._executor.submit(self.train_dataset.__getitem__, index)
+                for index in indices
+            ]
+        following = iteration + 1
+        if following < self.config.train.iterations and following not in self._pending:
+            self._pending[following] = [
+                self._executor.submit(self.train_dataset.__getitem__, index)
+                for index in self._batch_indices(following)
+            ]
+        return [future.result() for future in futures]
+
+    def close(self) -> None:
+        """Release the loading thread pool; safe to call more than once."""
+        self._pending.clear()
+        if self._executor is not None:
+            self._executor.shutdown(wait=False, cancel_futures=True)
+            self._executor = None
+
     def _optimize(
         self,
         loss: torch.Tensor,
@@ -390,7 +437,7 @@ class Trainer:
         return self.perceptual(composed, images)
 
     def _train_step_stage1(self, iteration: int) -> dict[str, float]:
-        samples = [self.train_dataset[index] for index in self._batch_indices(iteration)]
+        samples = self._fetch_samples(iteration)
         images, masks = collate_samples(samples)
         images = images.to(self.device)
         masks = masks.to(self.device)
@@ -434,7 +481,7 @@ class Trainer:
         ):
             raise RuntimeError("stage-two discriminator was not initialised")
 
-        samples = [self.train_dataset[index] for index in self._batch_indices(iteration)]
+        samples = self._fetch_samples(iteration)
         images, masks = collate_samples(samples)
         images = images.to(self.device)
         masks = masks.to(self.device)
@@ -599,7 +646,8 @@ class Trainer:
             f"[train] stage={self.stage} device={self.device} "
             f"params={self.parameter_count:,}{extra} "
             f"iters={self.start_iteration}->{total} "
-            f"batch={self.config.train.batch_size} precision={self.precision}",
+            f"batch={self.config.train.batch_size} precision={self.precision} "
+            f"workers={self.config.data.num_workers}",
             flush=True,
         )
 
@@ -607,112 +655,115 @@ class Trainer:
         no_improvement = self._patience_count
         final_iteration = self.start_iteration
 
-        for iteration in range(self.start_iteration, total):
-            started = time.perf_counter()
-            metrics = self._train_step(iteration)
-            entry = {"iteration": iteration, **metrics}
-            self._append_jsonl("train.jsonl", entry)
+        try:
+            for iteration in range(self.start_iteration, total):
+                started = time.perf_counter()
+                metrics = self._train_step(iteration)
+                entry = {"iteration": iteration, **metrics}
+                self._append_jsonl("train.jsonl", entry)
 
-            if (iteration + 1) % log_every == 0 or iteration == total - 1:
-                elapsed = time.perf_counter() - started
-                message = (
-                    f"[train] iter {iteration + 1}/{total} "
-                    f"loss={metrics['total']:.6f} hole={metrics['hole']:.6f} "
-                    f"valid={metrics['valid']:.6f} tv={metrics['tv']:.6f}"
-                )
-                if "perceptual" in metrics:
-                    message += f" perc={metrics['perceptual']:.6f}"
-                if self.stage == "stage2":
-                    message += (
-                        f" adv={metrics['adversarial']:.6f}"
-                        f" d={metrics['d_loss']:.6f}"
+                if (iteration + 1) % log_every == 0 or iteration == total - 1:
+                    elapsed = time.perf_counter() - started
+                    message = (
+                        f"[train] iter {iteration + 1}/{total} "
+                        f"loss={metrics['total']:.6f} hole={metrics['hole']:.6f} "
+                        f"valid={metrics['valid']:.6f} tv={metrics['tv']:.6f}"
                     )
-                message += (
-                    f" lr={metrics['lr']:.2e} grad={metrics['grad_norm']:.3f}"
-                    f" ({elapsed * 1000:.0f} ms)"
-                )
-                print(message, flush=True)
+                    if "perceptual" in metrics:
+                        message += f" perc={metrics['perceptual']:.6f}"
+                    if self.stage == "stage2":
+                        message += (
+                            f" adv={metrics['adversarial']:.6f}"
+                            f" d={metrics['d_loss']:.6f}"
+                        )
+                    message += (
+                        f" lr={metrics['lr']:.2e} grad={metrics['grad_norm']:.3f}"
+                        f" ({elapsed * 1000:.0f} ms)"
+                    )
+                    print(message, flush=True)
 
-            final_iteration = iteration + 1
+                final_iteration = iteration + 1
 
-            if final_iteration % val_every == 0 or final_iteration == total:
-                validation = validate(
-                    self.model,
-                    self.val_dataset,
-                    device=self.device,
-                    batch_size=self.config.train.val_batch_size,
-                    loss_fn=self.loss_fn,
-                    lpips_metric=self.lpips_metric,
-                )
-                validation["iteration"] = final_iteration
-                self.history.append(validation)
-                self._append_jsonl("val.jsonl", validation)
-
-                if self.config.train.val_visual_samples > 0:
-                    from hybrid_inpaint.training.engine.visualize import save_val_samples
-
-                    save_val_samples(
+                if final_iteration % val_every == 0 or final_iteration == total:
+                    validation = validate(
                         self.model,
                         self.val_dataset,
                         device=self.device,
-                        count=self.config.train.val_visual_samples,
-                        out_path=self.run_dir / "samples" / f"val_{final_iteration:06d}.png",
+                        batch_size=self.config.train.val_batch_size,
+                        loss_fn=self.loss_fn,
+                        lpips_metric=self.lpips_metric,
                     )
-                try:
-                    from hybrid_inpaint.training.engine.plots import plot_run
+                    validation["iteration"] = final_iteration
+                    self.history.append(validation)
+                    self._append_jsonl("val.jsonl", validation)
 
-                    plot_run(self.run_dir)
-                except ImportError:
-                    pass  # matplotlib 可选；曲线可事后用 plot 命令补画
+                    if self.config.train.val_visual_samples > 0:
+                        from hybrid_inpaint.training.engine.visualize import save_val_samples
 
-                message = (
-                    f"[val] iter {final_iteration}/{total} "
-                    f"psnr_hole={validation['psnr_hole']:.3f} "
-                    f"psnr_full={validation['psnr_full']:.3f} "
-                    f"ssim={validation['ssim']:.4f} "
-                    f"mae_hole={validation['mae_hole']:.4f} "
-                    f"loss={validation['loss_total']:.6f}"
-                )
-                if "lpips" in validation:
-                    message += f" lpips={validation['lpips']:.4f}"
-                print(message, flush=True)
+                        save_val_samples(
+                            self.model,
+                            self.val_dataset,
+                            device=self.device,
+                            count=self.config.train.val_visual_samples,
+                            out_path=self.run_dir / "samples" / f"val_{final_iteration:06d}.png",
+                        )
+                    try:
+                        from hybrid_inpaint.training.engine.plots import plot_run
 
-                improved_psnr = validation["psnr_hole"] > self.best_psnr_hole + 1e-9
-                if improved_psnr:
-                    self.best_psnr_hole = validation["psnr_hole"]
-                    no_improvement = 0
-                else:
-                    no_improvement += 1
+                        plot_run(self.run_dir)
+                    except ImportError:
+                        pass  # matplotlib 可选；曲线可事后用 plot 命令补画
 
-                improved_lpips = (
-                    "lpips" in validation and validation["lpips"] < self.best_lpips
-                )
-                if improved_lpips:
-                    self.best_lpips = validation["lpips"]
+                    message = (
+                        f"[val] iter {final_iteration}/{total} "
+                        f"psnr_hole={validation['psnr_hole']:.3f} "
+                        f"psnr_full={validation['psnr_full']:.3f} "
+                        f"ssim={validation['ssim']:.4f} "
+                        f"mae_hole={validation['mae_hole']:.4f} "
+                        f"loss={validation['loss_total']:.6f}"
+                    )
+                    if "lpips" in validation:
+                        message += f" lpips={validation['lpips']:.4f}"
+                    print(message, flush=True)
 
-                self._patience_count = no_improvement
-                self._save("last.pt", final_iteration)
-                if self.stage == "stage1":
+                    improved_psnr = validation["psnr_hole"] > self.best_psnr_hole + 1e-9
                     if improved_psnr:
-                        self._save("best.pt", final_iteration)
-                else:
-                    if improved_psnr:
-                        self._save("best_psnr.pt", final_iteration)
+                        self.best_psnr_hole = validation["psnr_hole"]
+                        no_improvement = 0
+                    else:
+                        no_improvement += 1
+
+                    improved_lpips = (
+                        "lpips" in validation and validation["lpips"] < self.best_lpips
+                    )
                     if improved_lpips:
-                        self._save("best_lpips.pt", final_iteration)
+                        self.best_lpips = validation["lpips"]
 
-                if no_improvement >= patience:
-                    stopped_early = True
-                    print(
-                        f"[train] early stop after {no_improvement} validations "
-                        f"without improvement",
-                        flush=True,
-                    )
-                    break
+                    self._patience_count = no_improvement
+                    self._save("last.pt", final_iteration)
+                    if self.stage == "stage1":
+                        if improved_psnr:
+                            self._save("best.pt", final_iteration)
+                    else:
+                        if improved_psnr:
+                            self._save("best_psnr.pt", final_iteration)
+                        if improved_lpips:
+                            self._save("best_lpips.pt", final_iteration)
 
-        if final_iteration == self.start_iteration:
-            # Defensive: a zero-length run never wrote a checkpoint.
-            self._save("last.pt", final_iteration)
+                    if no_improvement >= patience:
+                        stopped_early = True
+                        print(
+                            f"[train] early stop after {no_improvement} validations "
+                            f"without improvement",
+                            flush=True,
+                        )
+                        break
+
+            if final_iteration == self.start_iteration:
+                # Defensive: a zero-length run never wrote a checkpoint.
+                self._save("last.pt", final_iteration)
+        finally:
+            self.close()
 
         return TrainResult(
             run_dir=self.run_dir,

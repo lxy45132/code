@@ -21,7 +21,7 @@ data:
   root: ../../data/raw/places365
   mask_dir: ../../data/raw/mask
   image_size: 256
-  num_workers: 0
+  num_workers: 8
   train_split: train
   val_split: val
   test_split: test
