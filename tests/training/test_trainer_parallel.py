@@ -1,8 +1,9 @@
-"""Threaded sample loading must not change the training trajectory.
+"""Worker-process loading must not change the training trajectory.
 
-``data.num_workers > 0`` fetches batches through a thread pool with one-batch
-prefetch.  Datasets are pure per-index functions, so these tests pin the
-contract: identical samples, identical losses, identical resume behaviour.
+``data.num_workers > 0`` loads batches through a DataLoader whose
+``_IterationBatchSampler`` replays the deterministic per-iteration indices.
+Datasets are pure per-index functions, so these tests pin the contract:
+identical batches, identical losses, identical resume behaviour.
 """
 
 from __future__ import annotations
@@ -10,7 +11,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import numpy as np
 import torch
 
 from hybrid_inpaint.config import (
@@ -21,7 +21,7 @@ from hybrid_inpaint.config import (
     TrainConfig,
 )
 from hybrid_inpaint.training.data.factory import build_training_datasets
-from hybrid_inpaint.training.engine.trainer import Trainer
+from hybrid_inpaint.training.engine.trainer import Trainer, _IterationBatchSampler
 
 
 def _config(
@@ -69,22 +69,23 @@ def _train_entries(run_dir: Path) -> list[dict]:
     ]
 
 
-def test_parallel_fetch_matches_serial_sample_for_sample(tmp_path: Path) -> None:
-    config = _config(tmp_path, workers=4)
+def test_batch_sampler_replays_trainer_indices(tmp_path: Path) -> None:
+    config = _config(tmp_path, workers=0)
     train, val, identity = build_training_datasets(config)
     trainer = Trainer(config, train, val, data_identity=identity)
-    try:
-        for iteration in range(4):
-            parallel = trainer._fetch_samples(iteration)
-            serial = [train[index] for index in trainer._batch_indices(iteration)]
-            assert len(parallel) == len(serial)
-            for got, want in zip(parallel, serial):
-                assert got.sample_id == want.sample_id
-                assert np.array_equal(got.image.data, want.image.data)
-                assert np.array_equal(got.mask.data, want.mask.data)
-                assert got.meta == want.meta
-    finally:
-        trainer.close()
+
+    for start in (0, 4):
+        sampler = _IterationBatchSampler(
+            seed=config.train.seed,
+            length=len(train),
+            batch_size=config.train.batch_size,
+            start=start,
+            stop=8,
+        )
+        assert list(sampler) == [
+            trainer._batch_indices(iteration) for iteration in range(start, 8)
+        ]
+        assert len(sampler) == 8 - start
 
 
 def test_parallel_training_matches_serial_trajectory(tmp_path: Path) -> None:
@@ -93,7 +94,9 @@ def test_parallel_training_matches_serial_trajectory(tmp_path: Path) -> None:
     serial = Trainer(serial_config, serial_train, serial_val, data_identity=serial_identity)
     serial.fit()
 
-    parallel_config = _config(tmp_path, workers=4, output_name="parallel")
+    # Two workers keep Windows spawn overhead small while still exercising
+    # the multi-process path (fork on Linux, spawn on Windows).
+    parallel_config = _config(tmp_path, workers=2, output_name="parallel")
     parallel_train, parallel_val, parallel_identity = build_training_datasets(parallel_config)
     parallel = Trainer(
         parallel_config, parallel_train, parallel_val, data_identity=parallel_identity
@@ -104,15 +107,17 @@ def test_parallel_training_matches_serial_trajectory(tmp_path: Path) -> None:
     assert _train_entries(serial.run_dir) == _train_entries(parallel.run_dir)
     for key, value in serial.model.state_dict().items():
         assert torch.equal(value, parallel.model.state_dict()[key]), key
+    assert (parallel.run_dir / "checkpoints" / "last.pt").is_file()
+    assert (parallel.run_dir / "checkpoints" / "best.pt").is_file()
 
 
 def test_resume_with_workers_matches_uninterrupted(tmp_path: Path) -> None:
-    short_config = _config(tmp_path, workers=4, output_name="short")
+    short_config = _config(tmp_path, workers=2, output_name="short")
     short_train, short_val, short_identity = build_training_datasets(short_config)
     short = Trainer(short_config, short_train, short_val, data_identity=short_identity)
     short.fit(until=4)
 
-    resumed_config = _config(tmp_path, workers=4, output_name="resumed")
+    resumed_config = _config(tmp_path, workers=2, output_name="resumed")
     resumed_train, resumed_val, resumed_identity = build_training_datasets(resumed_config)
     resumed = Trainer(
         resumed_config,
@@ -125,7 +130,7 @@ def test_resume_with_workers_matches_uninterrupted(tmp_path: Path) -> None:
     assert resumed_result.start_iteration == 4
     assert resumed_result.final_iteration == 8
 
-    fresh_config = _config(tmp_path, workers=4, output_name="fresh")
+    fresh_config = _config(tmp_path, workers=2, output_name="fresh")
     fresh_train, fresh_val, fresh_identity = build_training_datasets(fresh_config)
     fresh = Trainer(fresh_config, fresh_train, fresh_val, data_identity=fresh_identity)
     fresh.fit()
@@ -134,17 +139,3 @@ def test_resume_with_workers_matches_uninterrupted(tmp_path: Path) -> None:
     assert _train_entries(resumed.run_dir) == _train_entries(fresh.run_dir)[4:]
     for key, value in fresh.model.state_dict().items():
         assert torch.allclose(value, resumed.model.state_dict()[key], atol=1e-6), key
-
-
-def test_close_is_idempotent_and_falls_back_to_serial(tmp_path: Path) -> None:
-    config = _config(tmp_path, workers=2)
-    train, val, identity = build_training_datasets(config)
-    trainer = Trainer(config, train, val, data_identity=identity)
-    trainer._fetch_samples(0)
-    trainer.close()
-    trainer.close()
-    # After close the serial path still serves identical samples.
-    got = trainer._fetch_samples(1)
-    want = [train[index] for index in trainer._batch_indices(1)]
-    for sample, expected in zip(got, want):
-        assert np.array_equal(sample.image.data, expected.image.data)

@@ -16,9 +16,11 @@ Batch composition is deterministic per iteration: iteration ``k`` draws its
 indices from ``SeedSequence([seed, 0xB2, k])``.  A resumed run sees exactly the
 same batches as an uninterrupted one without serialising a DataLoader iterator.
 Sample content is likewise a pure function of ``(seed, index)``, so with
-``data.num_workers > 0`` each batch is fetched through a thread pool (one task
-per sample) and the following batch is prefetched while the GPU trains; the
-samples are identical to the serial path, only the wall-clock time changes.
+``data.num_workers > 0`` batches are loaded by DataLoader worker processes
+(one deterministic index list per iteration, collated in the worker and
+transferred via shared memory) while the GPU trains; the samples are identical
+to the serial path, only the wall-clock time changes.  Threads were tried
+first and rejected: the augmentation pipeline is GIL-bound.
 """
 
 from __future__ import annotations
@@ -27,14 +29,14 @@ import json
 import math
 import random
 import time
-from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Iterator, Mapping, Sequence
 
 import numpy as np
 import torch
 from torch import nn
+from torch.utils.data import DataLoader
 
 from hybrid_inpaint.config import AppConfig
 from hybrid_inpaint.domain.entities import Sample
@@ -118,6 +120,44 @@ def _resolve_device(name: str) -> torch.device:
     return device
 
 
+class _IterationBatchSampler:
+    """Yield the deterministic index list of each iteration in order.
+
+    Mirrors ``Trainer._batch_indices`` exactly so a DataLoader-backed run
+    sees the same batches as the serial path (and as a resumed run).
+    """
+
+    def __init__(
+        self,
+        *,
+        seed: int,
+        length: int,
+        batch_size: int,
+        start: int,
+        stop: int,
+    ) -> None:
+        self.seed = seed
+        self.length = length
+        self.batch_size = batch_size
+        self.start = start
+        self.stop = stop
+
+    def __iter__(self) -> Iterator[list[int]]:
+        for iteration in range(self.start, self.stop):
+            rng = np.random.default_rng(
+                np.random.SeedSequence([self.seed, 0xB2, iteration])
+            )
+            indices = rng.choice(
+                self.length,
+                size=self.batch_size,
+                replace=self.batch_size > self.length,
+            )
+            yield [int(index) for index in indices]
+
+    def __len__(self) -> int:
+        return max(0, self.stop - self.start)
+
+
 class Trainer:
     """Stage-one / stage-two trainer with deterministic batches and resume."""
 
@@ -154,17 +194,6 @@ class Trainer:
         self.val_dataset = val_dataset
         self.device = _resolve_device(device or config.train.device)
         self.data_identity = dict(data_identity or {})
-
-        # Threaded sample loading + one-batch prefetch (num_workers=0 keeps
-        # the historical serial path).  Datasets are pure per-index functions,
-        # so parallel fetches cannot alter the training trajectory.
-        self._pending: dict[int, list[Future]] = {}
-        self._executor: ThreadPoolExecutor | None = None
-        if config.data.num_workers > 0:
-            self._executor = ThreadPoolExecutor(
-                max_workers=config.data.num_workers,
-                thread_name_prefix="inpaint-data",
-            )
 
         if run_dir is None:
             run_dir = (
@@ -345,37 +374,30 @@ class Trainer:
         return [int(index) for index in indices]
 
     def _fetch_samples(self, iteration: int) -> list[Sample]:
-        """Fetch one deterministic batch, optionally threaded + prefetched.
+        """Serial batch fetch (direct ``_train_step`` calls and tests).
 
-        Each sample becomes its own pool task (Pillow decoding and numpy
-        augmentation release the GIL), and the next batch is submitted before
-        the current one is consumed so loading overlaps the GPU step.  Order
-        and content match the serial path exactly.
+        The parallel path lives in ``fit``: a DataLoader with
+        ``_IterationBatchSampler`` produces the very same batches in worker
+        processes, so this method is only the fallback.
         """
-        indices = self._batch_indices(iteration)
-        if self._executor is None:
-            return [self.train_dataset[index] for index in indices]
+        return [self.train_dataset[index] for index in self._batch_indices(iteration)]
 
-        futures = self._pending.pop(iteration, None)
-        if futures is None:
-            futures = [
-                self._executor.submit(self.train_dataset.__getitem__, index)
-                for index in indices
-            ]
-        following = iteration + 1
-        if following < self.config.train.iterations and following not in self._pending:
-            self._pending[following] = [
-                self._executor.submit(self.train_dataset.__getitem__, index)
-                for index in self._batch_indices(following)
-            ]
-        return [future.result() for future in futures]
-
-    def close(self) -> None:
-        """Release the loading thread pool; safe to call more than once."""
-        self._pending.clear()
-        if self._executor is not None:
-            self._executor.shutdown(wait=False, cancel_futures=True)
-            self._executor = None
+    def _make_loader(self, stop: int) -> DataLoader:
+        """Worker-process loader yielding collated (images, masks) per iteration."""
+        return DataLoader(
+            self.train_dataset,
+            batch_sampler=_IterationBatchSampler(
+                seed=self.config.train.seed,
+                length=len(self.train_dataset),
+                batch_size=self.config.train.batch_size,
+                start=self.start_iteration,
+                stop=stop,
+            ),
+            num_workers=self.config.data.num_workers,
+            collate_fn=collate_samples,
+            pin_memory=self.device.type == "cuda",
+            prefetch_factor=2,
+        )
 
     def _optimize(
         self,
@@ -436,9 +458,15 @@ class Trainer:
             return None
         return self.perceptual(composed, images)
 
-    def _train_step_stage1(self, iteration: int) -> dict[str, float]:
-        samples = self._fetch_samples(iteration)
-        images, masks = collate_samples(samples)
+    def _train_step_stage1(
+        self,
+        iteration: int,
+        batch: tuple[torch.Tensor, torch.Tensor] | None = None,
+    ) -> dict[str, float]:
+        if batch is None:
+            images, masks = collate_samples(self._fetch_samples(iteration))
+        else:
+            images, masks = batch
         images = images.to(self.device)
         masks = masks.to(self.device)
 
@@ -473,7 +501,11 @@ class Trainer:
             result["perceptual"] = float(perceptual_value.detach())
         return result
 
-    def _train_step_stage2(self, iteration: int) -> dict[str, float]:
+    def _train_step_stage2(
+        self,
+        iteration: int,
+        batch: tuple[torch.Tensor, torch.Tensor] | None = None,
+    ) -> dict[str, float]:
         if (
             self.discriminator is None
             or self.optimizer_d is None
@@ -481,8 +513,10 @@ class Trainer:
         ):
             raise RuntimeError("stage-two discriminator was not initialised")
 
-        samples = self._fetch_samples(iteration)
-        images, masks = collate_samples(samples)
+        if batch is None:
+            images, masks = collate_samples(self._fetch_samples(iteration))
+        else:
+            images, masks = batch
         images = images.to(self.device)
         masks = masks.to(self.device)
         observed = images * (1.0 - masks)
@@ -555,10 +589,14 @@ class Trainer:
         result["lr_d"] = float(self.optimizer_d.param_groups[0]["lr"])
         return result
 
-    def _train_step(self, iteration: int) -> dict[str, float]:
+    def _train_step(
+        self,
+        iteration: int,
+        batch: tuple[torch.Tensor, torch.Tensor] | None = None,
+    ) -> dict[str, float]:
         if self.stage == "stage2":
-            return self._train_step_stage2(iteration)
-        return self._train_step_stage1(iteration)
+            return self._train_step_stage2(iteration, batch)
+        return self._train_step_stage1(iteration, batch)
 
     # -------------------------------------------------------------- persistence
     def _append_jsonl(self, name: str, entry: Mapping[str, Any]) -> None:
@@ -655,10 +693,15 @@ class Trainer:
         no_improvement = self._patience_count
         final_iteration = self.start_iteration
 
+        loader_iter = None
+        if self.config.data.num_workers > 0:
+            loader_iter = iter(self._make_loader(total))
+
         try:
             for iteration in range(self.start_iteration, total):
                 started = time.perf_counter()
-                metrics = self._train_step(iteration)
+                batch = next(loader_iter) if loader_iter is not None else None
+                metrics = self._train_step(iteration, batch)
                 entry = {"iteration": iteration, **metrics}
                 self._append_jsonl("train.jsonl", entry)
 
@@ -763,7 +806,11 @@ class Trainer:
                 # Defensive: a zero-length run never wrote a checkpoint.
                 self._save("last.pt", final_iteration)
         finally:
-            self.close()
+            if loader_iter is not None:
+                # Join worker processes on early stop / exception too
+                # (private but stable across torch 2.x; persistent_workers
+                # is off, so this terminates the pool).
+                loader_iter._shutdown_workers()
 
         return TrainResult(
             run_dir=self.run_dir,
