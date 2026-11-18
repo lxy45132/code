@@ -3,9 +3,10 @@ experiment_id: system
 
 system:
   model_id: main
-  # 当前为 dry-run 权重（仅工程冒烟，非论文结果）；正式训练后换回
-  # ../outputs/main/seed_2026/checkpoints/best_psnr.pt
-  checkpoint: ../outputs/dryrun_places/seed_2026/checkpoints/best.pt
+  # 正式权重（stage2，seed 2026）。切换 Places365 主模型：
+  #   model_id: places_main
+  #   checkpoint: ../model/places_main/seed_2026/best_psnr.pt
+  checkpoint: ../model/main/seed_2026/best_psnr.pt
   device: cuda
   pad_multiple: 16
   tiling:
