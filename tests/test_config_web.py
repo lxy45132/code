@@ -22,6 +22,7 @@ def test_defaults_keep_sqlite_backend_and_inline_mode(tmp_path: Path) -> None:
     assert parsed.system.storage.backend == "sqlite"
     assert parsed.system.inference.mode == "inline"
     assert parsed.system.inference.chunk_size == 8
+    assert parsed.system.inference.max_side == 384
     assert parsed.system.redis.url == "redis://127.0.0.1:6379/0"
     assert parsed.system.celery.retries == 3
     assert parsed.system.batch.max_items == 32
@@ -55,6 +56,7 @@ def test_mysql_backend_is_accepted(tmp_path: Path) -> None:
         "  storage:\n    backend: postgres",  # 非法 backend
         "  redis:\n    url: mysql://127.0.0.1:3306",  # 非 redis 协议
         "  inference:\n    chunk_size: 0",  # 越界
+        "  inference:\n    max_side: 32",  # 过小
         "  inference:\n    mode: inline3",  # 非法 mode
         "  web:\n    workers: 0",  # 越界
         "  web:\n    port: 70000",  # 越界

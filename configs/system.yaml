@@ -27,6 +27,9 @@ system:
   inference:
     mode: inline
     chunk_size: 8
+    # 模型只在 256 尺度训练；超过 384 的大图先缩放推理再放大回洞内，
+    # 避免 ViT+GAN 在非训练尺度上的网格伪影。null 关闭该归一化。
+    max_side: 384
   storage:
     backend: mysql
     mysql:

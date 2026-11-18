@@ -82,6 +82,32 @@ def test_large_input_uses_tiling_and_warns(tmp_path: Path) -> None:
     assert engine.last_warnings  # 分块警告非空
 
 
+def test_large_input_downscales_and_preserves_outside(tmp_path: Path) -> None:
+    engine = _engine(tmp_path, tile_size=256, max_side=32)
+    image = np.random.default_rng(1).integers(0, 256, (96, 80, 3), dtype=np.uint8)
+    mask = np.zeros((96, 80), dtype=np.bool_)
+    mask[30:60, 20:50] = True
+
+    out = engine.inpaint(image, mask)
+
+    assert out.shape == (96, 80, 3)
+    assert np.array_equal(out[~mask], image[~mask].astype(np.float32) / 255.0)
+    assert any("downscaled" in warning for warning in engine.last_warnings)
+    assert not any("tiled" in warning for warning in engine.last_warnings)
+
+
+def test_max_side_none_keeps_native_resolution(tmp_path: Path) -> None:
+    engine = _engine(tmp_path, tile_size=256, max_side=None)
+    image = np.zeros((96, 80, 3), dtype=np.uint8)
+    mask = np.zeros((96, 80), dtype=np.bool_)
+    mask[30:60, 20:50] = True
+
+    out = engine.inpaint(image, mask)
+
+    assert out.shape == (96, 80, 3)
+    assert not any("downscaled" in warning for warning in engine.last_warnings)
+
+
 def test_missing_checkpoint_raises_model_unavailable(tmp_path: Path) -> None:
     with pytest.raises(ModelUnavailableError):
         TorchInpaintEngine(tmp_path / "nope.pt", device="cpu")

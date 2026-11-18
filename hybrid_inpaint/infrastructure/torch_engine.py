@@ -13,6 +13,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from torch.nn import functional as F
 
 from hybrid_inpaint.config import validate_checkpoint_config
 from hybrid_inpaint.domain.errors import (
@@ -43,7 +44,10 @@ class TorchInpaintEngine:
         pad_multiple: int = 16,
         tile_size: int = 512,
         tile_overlap: int = 64,
+        max_side: int | None = None,
     ) -> None:
+        if max_side is not None and max_side < 1:
+            raise ValueError("max_side must be >= 1 or None")
         source = Path(checkpoint)
         try:
             payload = load_checkpoint(
@@ -61,6 +65,7 @@ class TorchInpaintEngine:
         self._pad = pad_multiple
         self._tile_size = tile_size
         self._tile_overlap = tile_overlap
+        self._max_side = max_side
         self._amp_enabled = stored.train.precision != "fp32" and self._device.type in (
             "cuda",
             "cpu",
@@ -90,10 +95,23 @@ class TorchInpaintEngine:
             self._model(dummy)
 
     def inpaint(self, image: np.ndarray, mask: np.ndarray) -> np.ndarray:
+        self._validate(image, mask)
+        if self._needs_downscale(image):
+            return self._inpaint_downscaled(image, mask)
+        return self._inpaint_direct(image, mask)
+
+    @staticmethod
+    def _validate(image: np.ndarray, mask: np.ndarray) -> None:
         if image.ndim != 3 or image.shape[2] != 3 or image.dtype != np.uint8:
             raise ValidationError("engine expects uint8 HxWx3 image")
         if mask.shape != image.shape[:2] or mask.dtype != np.bool_:
             raise ValidationError("engine expects bool mask matching image size")
+
+    def _needs_downscale(self, image: np.ndarray) -> bool:
+        return self._max_side is not None and max(image.shape[:2]) > self._max_side
+
+    def _inpaint_direct(self, image: np.ndarray, mask: np.ndarray) -> np.ndarray:
+        """Native-resolution inference (public path after scale normalisation)."""
         self._warnings = ()
         x = image.astype(np.float32) / 255.0
         if max(x.shape[:2]) > self._tile_size:
@@ -113,6 +131,71 @@ class TorchInpaintEngine:
             )
         return self._forward_stack([image], [mask])[0]
 
+    def _inpaint_downscaled(
+        self, image: np.ndarray, mask: np.ndarray
+    ) -> np.ndarray:
+        """Scale-normalised inference for images larger than ``max_side``.
+
+        The model was trained at one resolution; feeding a much larger image
+        produces structured artefacts.  Downscale the whole image (and mask)
+        to ``max_side``, infer, then upsample only the hole content back to the
+        original resolution.  Pixels outside the hole stay bit-identical.
+        """
+        assert self._max_side is not None
+        height, width = image.shape[:2]
+        scale = self._max_side / float(max(height, width))
+        new_width = max(1, int(round(width * scale)))
+        new_height = max(1, int(round(height * scale)))
+
+        image_tensor = (
+            torch.from_numpy(np.ascontiguousarray(image, dtype=np.float32))
+            .permute(2, 0, 1)
+            .unsqueeze(0)
+            / 255.0
+        )
+        mask_tensor = (
+            torch.from_numpy(np.ascontiguousarray(mask, dtype=np.float32))
+            .unsqueeze(0)
+            .unsqueeze(0)
+        )
+        small = F.interpolate(
+            image_tensor,
+            size=(new_height, new_width),
+            mode="bilinear",
+            align_corners=False,
+            antialias=True,
+        ).clamp_(0.0, 1.0)
+        small_mask = (
+            F.interpolate(mask_tensor, size=(new_height, new_width), mode="nearest")
+            .squeeze(0)
+            .squeeze(0)
+            .numpy()
+            > 0.5
+        )
+        small_uint8 = (
+            (small.squeeze(0).permute(1, 2, 0).numpy() * 255.0)
+            .round()
+            .astype(np.uint8)
+        )
+        generated = self._inpaint_direct(small_uint8, small_mask)
+        upsampled = F.interpolate(
+            torch.from_numpy(np.ascontiguousarray(generated))
+            .permute(2, 0, 1)
+            .unsqueeze(0),
+            size=(height, width),
+            mode="bilinear",
+            align_corners=False,
+            antialias=True,
+        ).squeeze(0).permute(1, 2, 0).numpy()
+
+        output = image.astype(np.float32) / 255.0
+        output[mask] = np.clip(upsampled, 0.0, 1.0)[mask]
+        self._warnings = (
+            f"downscaled inference {width}x{height} -> {new_width}x{new_height} "
+            f"(max_side={self._max_side})",
+        )
+        return output
+
     def inpaint_many(
         self, images: list[np.ndarray], masks: list[np.ndarray]
     ) -> list[np.ndarray]:
@@ -125,19 +208,26 @@ class TorchInpaintEngine:
             raise ValidationError("images and masks count differ")
         results: list[np.ndarray | None] = [None] * len(images)
         groups: dict[tuple[int, int], list[int]] = {}
+        downscaled = 0
         for index, image in enumerate(images):
-            if image.ndim != 3 or image.shape[2] != 3 or image.dtype != np.uint8:
-                raise ValidationError("engine expects uint8 HxWx3 image")
-            if masks[index].shape != image.shape[:2] or masks[index].dtype != np.bool_:
-                raise ValidationError("engine expects bool mask matching image size")
-            groups.setdefault(image.shape[:2], []).append(index)
+            self._validate(image, masks[index])
+            if self._needs_downscale(image):
+                results[index] = self._inpaint_downscaled(image, masks[index])
+                downscaled += 1
+            else:
+                groups.setdefault(image.shape[:2], []).append(index)
         self._warnings = ()
         for shape, indexes in groups.items():
             if len(indexes) == 1 or max(shape) > self._tile_size:
                 for index in indexes:
-                    results[index] = self.inpaint(images[index], masks[index])
+                    results[index] = self._inpaint_direct(images[index], masks[index])
                 continue
             self._inpaint_group(indexes, images, masks, results)
+        if downscaled:
+            self._warnings = (
+                f"downscaled inference for {downscaled} image(s) "
+                f"(max_side={self._max_side})",
+            ) + self._warnings
         return [result for result in results if result is not None]
 
     def _inpaint_group(

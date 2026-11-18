@@ -139,6 +139,7 @@ def build_container(
             pad_multiple=config.system.pad_multiple,
             tile_size=config.system.tiling.tile_size,
             tile_overlap=config.system.tiling.tile_overlap,
+            max_side=config.system.inference.max_side,
         )
         engine = SerializedEngine(
             repository.load(repository.resolve(config.system.model_id)),

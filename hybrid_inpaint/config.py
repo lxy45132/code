@@ -346,12 +346,22 @@ class WebConfig(StrictModel):
 class InferenceConfig(StrictModel):
     mode: Literal["inline", "worker"] = "inline"
     chunk_size: int = 8
+    # 模型训练分辨率为 256；超出该尺度的大图先缩到 max_side 再推理，
+    # 否则 ViT/GAN 在非训练尺度上会产生网格伪影。null 表示关闭。
+    max_side: int | None = 384
 
     @field_validator("chunk_size")
     @classmethod
     def _valid_chunk_size(cls, value: int) -> int:
         if not 1 <= value <= 64:
             raise ValueError("chunk_size must be in [1, 64]")
+        return value
+
+    @field_validator("max_side")
+    @classmethod
+    def _valid_max_side(cls, value: int | None) -> int | None:
+        if value is not None and value < 64:
+            raise ValueError("max_side must be >= 64 or null")
         return value
 
 

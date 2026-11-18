@@ -48,6 +48,19 @@ def test_many_mixed_sizes_degrades_per_image(tmp_path: Path) -> None:
         assert np.allclose(result, engine.inpaint(image, mask), atol=1e-5)
 
 
+def test_many_downscales_images_above_max_side(tmp_path: Path) -> None:
+    engine = _engine(tmp_path, tile_size=256, max_side=16)
+    images = [_image(32, 80), _image(16, 120), _image(48, 160)]
+    masks = [_mask(32), _mask(16), _mask(48)]
+
+    results = engine.inpaint_many(images, masks)
+
+    assert [r.shape[:2] for r in results] == [(32, 32), (16, 16), (48, 48)]
+    assert any("downscaled" in warning for warning in engine.last_warnings)
+    for result, image, mask in zip(results, images, masks):
+        assert np.allclose(result, engine.inpaint(image, mask), atol=1e-5)
+
+
 def test_many_rejects_mismatched_counts(tmp_path: Path) -> None:
     engine = _engine(tmp_path)
     with pytest.raises(ValidationError):

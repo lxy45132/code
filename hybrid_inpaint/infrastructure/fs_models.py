@@ -21,12 +21,14 @@ class FileSystemModelRepository:
         pad_multiple: int = 16,
         tile_size: int = 512,
         tile_overlap: int = 64,
+        max_side: int | None = None,
     ) -> None:
         self._specs = {spec.model_id: spec for spec in specs}
         self._device = device
         self._pad_multiple = pad_multiple
         self._tile_size = tile_size
         self._tile_overlap = tile_overlap
+        self._max_side = max_side
 
     def resolve(self, model_id: str) -> ModelSpec:
         spec = self._specs.get(model_id)
@@ -50,4 +52,5 @@ class FileSystemModelRepository:
             pad_multiple=self._pad_multiple,
             tile_size=self._tile_size,
             tile_overlap=self._tile_overlap,
+            max_side=self._max_side,
         )
